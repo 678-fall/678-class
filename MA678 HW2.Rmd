@@ -1,0 +1,306 @@
+---
+title: "MA678 Homework 2"
+date: "9/20/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 11.5 
+*Residuals and predictions*: The folder `Pyth` contains outcome $y$ and predictors $x_1$, $x_2$ for 40 data points, with a further 20 points with the predictors but no observed outcome. Save the file to your working directory, then read it into R using `read.table()`.
+
+### (a) 
+Use R to fit a linear regression model predicting $y$ from $x_1$, $x_2$, using the first 40 data points in the file. Summarize the inferences and check the fit of your model.
+
+```{r}
+df <- read.table("pyth.txt",header=TRUE)
+head(df)
+data_points <- df[1:40, ]
+no_data_points <-df[41:60,]
+fit<- lm(y ~ x1+x2,data= data_points)
+summary(fit)
+# the result shows that p value for intercept, coefficient of x1 and x2 are all very small, they are working well
+``` 
+
+### (b) 
+Display the estimated model graphically as in Figure 10.2
+
+```{r}
+library(ggplot2)
+ggplot(data_points,aes(x=x1,y=y,color=x2))+
+  geom_point()+
+  geom_smooth(method="lm",formula= y~x1+x2,se=FALSE)
+```
+
+### (c) 
+Make a residual plot for this model. Do the assumptions appear to be met?
+
+```{r}
+
+plot(fit, which = 1)  # Residuals vs Fitted
+plot(fit, which = 2)  # Normal Q-Q
+# most residuals are around 0 and the smooth line is almost flat
+#there a few outliers with high residuals but not so extreme
+#the R^2 = 0.97 which is really good
+#overall, the assumptions is met and the model is good
+```
+
+
+### (d) 
+Make predictions for the remaining 20 data points in the file. How confident do you feel about these predictions?
+
+```{r}
+pred <- predict(fit, newdata = no_data_points, interval = "prediction") 
+head(pred,20)
+# showing the result of 95% confidence interval of fitted value and it's looking good
+```
+
+
+## 12.5 
+*Logarithmic transformation and regression*: Consider the following regression:
+$$\log(\text{weight})=-3.8+2.1 \log(\text{height})+\text{error,} $$
+with errors that have standard deviation 0.25. Weights are in pounds and heights are in inches.
+
+### (a) 
+Fill in the blanks: Approximately 68% of the people will have weights within a factor of ___e^(-0.25)=0.78___ and ___e^(0.25)=1.28___ of their predicted values from the regression.
+
+
+### (b) 
+Using pen and paper, sketch the regression line and scatterplot of log(weight) versus log(height) that make sense and are consistent with the fitted model. Be sure to label the axes of your graph.
+
+![](IMG_9F66A0668AA3-1.jpeg)
+
+
+## 12.6 
+*Logarithmic transformations*: The folder `Pollution` contains mortality rates and various environmental factors from 60 US metropolitan areas. For this exercise we shall model mortality rate given nitric oxides, sulfur dioxide, and hydrocarbons as inputs. this model is an extreme oversimplication, as it combines all sources of mortality and does not adjust for crucial factors such as age and smoking. We use it to illustrate log transformation in regression.  
+
+### (a) 
+Create a scatterplot of mortality rate versus level of nitric oxides. Do you think linear regression will fit these data well? Fit the regression and evaluate a residual plot from the regression.
+
+```{r}
+df <- read.csv("https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Pollution/data/pollution.csv", header = TRUE)
+plot(df$nox,df$mort,xlab = "level of nitric oxides",ylab = "mortality rate",main = "mortality rate versus level of nitric oxides")
+fit1<- lm(mort~nox,data = df)
+summary(fit1)
+###the p_value of nox is really high (>0.5),which means the linear regression doesn't fit well for morality vs. nitric oxides
+
+plot(fit1,which=1)
+abline(h = 0)
+#residuals are wide spread and are not evenly scattered around 0, which means the model is not fitting well
+```
+
+### (b) 
+Find an appropriate reansformation that will result in data more appropriate for linear regression. Fit a regression to the transformed data and evaluate the new residual plot.
+
+```{r}
+fit2 <- lm(log(mort)~ log(nox),data=df)
+summary(fit2)
+#the p_value for coefficient of log(nox) is pretty low(<0.05),there \n is statistical evidence of an association between log(NOx) and log(Mortality).
+plot(fit2,which=1)
+#Residuals scattered around 0, and the red line is fairly flat.
+#Although there are three outliers that may influence the trend, but generally it's good fit.
+```
+
+### (c) 
+Interpret the slope coefficient from the model you chose in (b)
+```{r}
+cat("Intercept = 6.807 (baseline when log(NOx) = 0 → not very meaningful in practice since NOx > 0).\n")
+cat("the slope coefficient 0.0159 means that every 1% increase in x, there is about 0,0159% increase in y")
+```
+
+### (d) 
+Now fit a model predicting mortality rate using levels of nitric oxides, sulfur dioxide, and hydrocarbons as inputs. Use appropriate transformation when helpful. Plot the fitted regression model and interpret the coefficients.
+```{r}
+fit3<- lm(mort~nox+so2+hc,data = df )
+summary(fit3)
+#from the result ,the linear regression is fitting nox and hc well, but doesn't fit so2 well since its p_value is higher than 0.05. In another word, there is a clear pattern that mortality has a linear relationship with nitric oxides and hydrocarbons, but not with so2
+#so try to use log transformation
+fit4<- lm(log(mort)~log(nox)+log(so2)+log(hc),data = df)
+summary(fit4)
+#interpretation of coefficient:
+#log(NOx) (β = 0.060, p = 0.012): a 1% increase in NOx is associated with about a 0.06% increase in mortality, holding SO2 and HC constant.
+#log(SO2) (β = 0.014, p = 0.064): weak effect, marginally significant at 0.1 but not at 0.05. Suggests a possible positive association.
+#log(HC) (β = –0.061, p = 0.0045): statistically significant negative coefficient. For every 1% increase in HC, mortality decreases by about 0.06%, holding other pollutants constant. Again, this negative relationship is surprising and likely reflects correlations among the pollutants rather than a real protective effect.
+#same as the above, the linear regression after log transformation is fitting even better for nox and hc,there is a 
+#and it's getting better for so2, too. however, the p_value is still slightly more than 0.05(0.064),so conclude there is no clear linear reltionship between mortality and so2
+plot(fit4, which=1)
+#the red smooth line is flat around 0,which suggests the model captures the main trend pretty well and there is no major curvature (good linearity assumption)
+#residuals are scattered roughly evenly above and below 0
+#in conclusion:Adding SO2 and HC improved the model: residuals look more balanced and the red line is flatter. Overall, the multiple log–linear regression seems to be a reasonable fit for these data.
+```
+
+
+### (e) 
+Cross validate: fit the model you chose above to the first half of the data and then predict for the second half. You used all the data to construct the model in (d), so this is not really cross validation, but it gives a sense of how the steps of cross validation can be implemented.
+
+```{r}
+n<-nrow(df)
+fit_data<- df[1:n/2,]
+pre_data<-df[(n/2+1):n,]
+pre<- predict(fit4,pre_data)
+plot(pre,log(pre_data$mort),xlab="predicted value",ylab="observed data",main="predicted value vs. observed data")
+abline(0, 1, col = "red")
+#Predictions aligned reasonably well with observed values, though some scatter remained.
+
+```
+## 12.7 
+*Cross validation comparison of models with different transformations of outcomes*: when we compare models with transformed continuous outcomes, we must take into account how the nonlinear transformation warps the continuous outcomes. Follow the procedure used to compare models for the mesquite bushes example on page 202.
+
+### (a) 
+Compare models for earnings and for log(earnings) given height and sex as shown in page 84 and 192. Use `earnk` and `log(earnk)` as outcomes.
+
+```{r}
+df <- read.csv("https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Earnings/data/earnings.csv",stringsAsFactors = FALSE)
+df <- subset(df, is.finite(earnk) & earnk > 0 & is.finite(height) & !is.na(male))
+df$male <- factor(df$male, levels = c(0, 1),
+                  labels = c("female", "male"))
+m_raw <- lm(earnk ~ height + male, data = df)
+m_log <- lm(log(earnk) ~ height + male, data = df)
+
+summary(m_raw)
+summary(m_log)
+
+b_h   <- coef(m_log)["height"]
+b_m <- coef(m_log)[grep("^male", names(coef(m_log)))]
+b_m   <- if (!is.na(b_m)) b_m else coef(m_log)[grep("^male", names(coef(m_log)))[1]]
+
+inch_pct   <- 100 * b_h                        
+# ≈ % change in earnings per +1 inch (small-beta approx)
+male_ratio <- exp(b_m)                         
+# multiplicative ratio male vs female at same height
+male_pct   <- 100 * (male_ratio - 1)           
+# % difference
+cat(sprintf("Log model: +1 inch ≈ %.2f%% higher earnings; male vs female ≈ %.1f%% higher (same height).\n",
+            inch_pct, male_pct))
+set.seed(615)  # reproducible fold assignment (like p. 202 workflow)
+k <- 10
+n <- nrow(df)
+folds <- sample(rep(1:k, length.out = n))
+
+pred_raw  <- rep(NA_real_, n)
+pred_logB <- rep(NA_real_, n)  # back-transformed log predictions with smearing
+
+for (i in 1:k) {
+  tr <- df[folds != i, ]
+  te <- df[folds == i, ]
+
+  # Model A: raw outcome
+  mA <- lm(earnk ~ height + male, data = tr)
+  pred_raw[folds == i] <- predict(mA, newdata = te)
+
+  # Model B: log outcome + Duan smearing back-transform
+  mB <- lm(log(earnk) ~ height + male, data = tr)
+  smear <- mean(exp(residuals(mB)), na.rm = TRUE)  # E[exp(e)]
+  muhat <- predict(mB, newdata = te)               # predictions on log scale
+  pred_logB[folds == i] <- exp(muhat) * smear      # back to original scale
+}
+
+## ---- 4) Compare predictive performance on original scale ----
+rmse <- function(a, b) sqrt(mean((a - b)^2))
+mae  <- function(a, b) mean(abs(a - b))
+
+cv_table <- data.frame(
+  Model = c("Raw: earnk ~ height + male",
+            "Log: log(earnk) ~ height + male (back-transformed w/ Duan smearing)"),
+  RMSE  = c(rmse(df$earnk, pred_raw),  rmse(df$earnk, pred_logB)),
+  MAE   = c(mae(df$earnk,  pred_raw),  mae(df$earnk,  pred_logB))
+)
+
+cat("\n=== 10-fold CV (errors on ORIGINAL earnk scale, in $1000s) ===\n")
+print(cv_table)
+#Prediction accuracy: Both models perform almost identically on the original scale (RMSE/MAE). There’s no clear predictive advantage of the log model.Interpretation: The log model is still more convenient for interpretation:Each extra inch of height is associated with ≈ 2.4% higher earnings.Men earn ≈ 45% more than women of the same height.
+```
+
+### (b) 
+Compare models from other exercises in this chapter.
+```{r}
+
+df_poll <- read.csv("https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Pollution/data/pollution.csv")
+
+df_poll <- subset(df_poll, is.finite(mort) & mort > 0 &
+                             is.finite(nox) & is.finite(so2) & is.finite(hc))
+
+# Compare raw vs log outcome models
+cv_res_poll <- cv_compare_outcome(
+  mort ~ nox + so2 + hc,
+  log(mort) ~ log(nox) + log(so2) + log(hc),
+  data = df_poll,
+  k = 10,
+  seed = 615
+)
+
+print(cv_res_poll)
+#For the Pollution data, cross-validation indicates that the raw outcome model predicts mortality better (RMSE ≈ 57.3, MAE ≈ 45.8) than the log-transformed model (RMSE ≈ 65.6, MAE ≈ 46.9). Although the log–log formulation offered elasticity-style interpretations of the pollutant effects in 12.6, it does not improve predictive performance here. This highlights that transformations should be judged case by case: sometimes they improve both fit and interpretability, but in other situations they may help interpretation without enhancing prediction.
+
+```
+
+
+## 12.8 
+*Log-log transformations*: Suppose that, for a certain population of animals, we can predict log weight from log height as follows:  
+
+* An animal that is 50 centimeters tall is predicted to weigh 10 kg.
+
+* Every increase of 1% in height corresponds to a predicted increase of 2% in weight.
+
+* The weights of approximately 95% of the animals fall within a factor of 1.1 of predicted values.
+
+### (a) 
+Give the equation of the regression line and the residual standard deviation of the regression.
+ln(weight_kg)= -5.521 + ln(height_cm)
+1.96*sigma = ln(1.1) -> sigma = 0.0486
+### (b) 
+Suppose the standard deviation of log weights is 20% in this population. What, then, is the $R^{2}$ of the regression model described here? 
+$$
+R^2 = 1 - \frac{\text{Var}(\text{residuals})}{\text{Var}(\ln(\text{weight}))}.
+$$
+$$
+R^2 = 1 - \frac{0.00236}{0.04}
+     \approx 1 - 0.059
+     \approx 0.94.
+$$
+```{r}
+cat("the value of R^2 is 0.94, which is very high. It suggests the relationship between weight and height is strong and predictable")
+```
+
+## 12.9 
+
+*Linear and logarithmic transformations*: For a study of congressional elections, you would like a measure of the relative amount of money raised by each of the two major-party candidates in each district. Suppose that you know the amount of money raised by each candidate; label these dollar values $D_i$ and $R_i$. You would like to combine these into a single variable that can be included as an input variable into a model predicting vote share for the Democrats. Discuss the advantages and disadvantages of the following measures:  
+
+### (a) 
+The simple difference, $D_i - R_i$
+advantage: it keeps the original unit in dollars, one can easily see the direct difference between the two groups. it's also easier to interpret the difference in dollar terms like “How many more dollars did the Democrat raise than the Republican?”
+disadvantage: Doesn’t scale: $100k difference is huge in a small race but trivial in a big-money Senate race. Distribution may be very skewed if some candidates raise much more money overall. Not comparable across districts with different fundraising levels.
+### (b) 
+The ratio, $D_i / R_i$
+advantage:Captures relative fundraising strength: a Democrat who raises twice as much as the opponent has the same ratio whether it’s $20k vs $10k or $2M vs $1M. Dimensionless (no units), so it’s more comparable across districts.
+disadvantage:Ratios can be unstable when $R^i$ is small (division by tiny numbers → huge values).Highly skewed distribution (e.g., ratios of 10, 20, 100). Harder to interpret directly in terms of vote share.
+### (c) 
+The difference on the logarithmic scale, $\log D_i - \log R_i$   
+advantage:similar to $D_i / R_i$ , which compresses extreme ratios. Symmetric: if Democrats raise half as much, value = −log2; if they raise twice as much, value = +log2. Works well in regression because it stabilizes variance and makes effect sizes more interpretable.
+disadvantage:it;s harder to interpret the number directly. there is no unit.
+### (d) 
+The relative proportion, $D_{i}/(D_{i}+R_{i})$. 
+advantage:Normalized between 0 and 1 (proportion of total funds raised by Democrats). Easy to interpret: 0.6 means Democrats raised 60% of the money. Comparable across races of any size.
+disadvantage:Nonlinear effects: a change from 0.4 to 0.5 may matter differently than 0.8 to 0.9. Skewed distribution if many races are lopsided. Still undefined if both candidates raise zero.
+
+## 12.11
+*Elasticity*: An economist runs a regression examining the relations between the average price of cigarettes, $P$, and the quantity purchased, $Q$, across a large sample of counties in the United  States, assuming the functional form, $\log Q=\alpha+\beta \log P$. Suppose the estimate for $\beta$ is 0.3.  Interpret this coefficient. 
+$\beta=0.3$: for every 1% increase in the average price of cigarettes, there is a 0.3% increase in the quantity purchased.
+this is weird because generally the higher the price, the less the purchase 
+
+## 12.13
+*Building regression models*: Return to the teaching evaluations data from Exercise 10.6. Fit regression models predicting evaluations given many of the inputs in the dataset. Consider interactions, combinations of predictors, and transformations, as appropriate. Consider several  models, discuss in detail the final model that you choose, and also explain why you chose it rather than the others you had considered. 
+
+```{r}
+
+```
+
+
+## 12.14
+Prediction from a fitted regression: Consider one of the fitted models for mesquite leaves, for example `fit_4`, in Section 12.6. Suppose you wish to use this model to make inferences about the average mesquite yield in a new set of trees whose predictors are in data frame called  new_trees. Give R code to obtain an estimate and standard error for this population average. You do not need to make the prediction; just give the code. 
+
+```{r}
+
+```

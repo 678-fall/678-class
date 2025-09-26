@@ -363,3 +363,4 @@ se_avg<- sqrt(mean(pred$se.fit^2))
 list(estimate = estimate, se = se_avg)
 
 
+

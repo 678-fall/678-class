@@ -1,0 +1,539 @@
+---
+title: "MA678 Homework 4"
+author: "ZHIXUAN GUAN"
+date: "10/10/2025"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Disclaimer (remove after you've read)!
+
+A few things to keep in mind :  
+1) Use `set.seed()` to make sure that the document produces the same random simulation as when you ran the code.  
+2) Use `refresh=0` for any `stan_glm()` or stan-based model. `lm()` or non-stan models don't need this!  
+3) You can type outside of the R chunks and make new R chunks where it's convenient. Make sure it's clear which questions you're answering.  
+4) Even if you're not too confident, please try giving an answer to the text responses!  
+5) Please don't print data in the document unless the question asks. It's good for you to do it to look at the data, but not as good for someone trying to read the document later on.  
+6) Check your document before submitting! Please put your name where "Your Name" is by the author!
+
+
+
+## 13.5 Interpreting logistic regression coefficients
+Here is a fitted model from the Bangladesh analysis predicting whether a person with high-arsenic drinking water will switch wells, given the  arsenic level in their existing well and the distance to the nearest safe well:  
+
+````
+stan_glm(formula = switch ~ dist100 + arsenic, family=binomial(link="logit"), data=wells)  
+             Median MAD_SD  
+(Intercept)   0.00   0.08  
+dist100      -0.90   0.10  
+arsenic       0.46   0.04  
+````
+
+Compare two people who live the same distance from the nearest well but whose arsenic levels differ, with one person having an arsenic level of 0.5 and the other person having a level of 1.0. You will estimate how much more likely this second person is to switch wells. Give an approximate estimate, standard error, 50% interval, and 95% interval, using two different methods:
+
+### (a) 
+Use the divide-by-4 rule, based on the information from this regression output.  
+By the divide-by-4 rule, β/4= 0.115
+estimate = 0.115*(1-0.5) = 0.0575
+var(β/4)= 1/16*0.04^2 = 0.0001
+se = (var(β))^(1/2) = 0.01
+50%CI = (0.0575-0.67*0.01, 0.0575+0.67*0.01) = (0.088, 0.142)
+95%CI = (0.035, 0.195)
+
+### (b) 
+Use predictive simulation from the fitted model in R, under the assumption that these two  people each live 50 meters from the nearest safe well. 
+```{r}
+library(rstanarm)
+wells <- read.csv("https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Arsenic/data/wells.csv")
+wells$dist100 <- wells$dist/100
+fit_glm <- glm(switch ~ dist100 + arsenic, data = wells,
+               family = binomial(link = "logit"))
+
+new <- data.frame(dist100 = 0.5, arsenic = c(0.5, 1.0))
+
+p_hat <- predict(fit_glm, newdata = new, type = "response")
+diff_hat <- p_hat[2] - p_hat[1]
+p_hat; diff_hat
+
+set.seed(123)
+B <- 4000
+beta_draws <- MASS::mvrnorm(B, coef(fit_glm), vcov(fit_glm))
+
+x1 <- c(1, 0.5, 0.5)  # (Intercept, dist100, arsenic)
+x2 <- c(1, 0.5, 1.0)
+
+lin1 <- beta_draws %*% x1
+lin2 <- beta_draws %*% x2
+p1 <- plogis(lin1); p2 <- plogis(lin2)
+diff_sim <- as.numeric(p2 - p1)
+
+c(
+  estimate = mean(diff_sim),
+  se = sd(diff_sim),
+  `25%` = quantile(diff_sim, 0.25),
+  `75%` = quantile(diff_sim, 0.75),
+  `2.5%` = quantile(diff_sim, 0.025),
+  `97.5%` = quantile(diff_sim, 0.975)
+)
+#people equally far from a safe well are more likely to switch when their water has higher arsenic—about +6 percentage points (95% ≈ +4.8% to +6.7%), consistent with both the divide-by-4 heuristic and your predictive simulation.
+```
+
+
+## 13.7 Graphing a fitted logistic regression
+We downloaded data with weight (in pounds) and age (in  years) from a random sample of American adults. We then defined a new variable:
+
+````
+heavy <- weight > 200
+````
+
+and fit a logistic regression, predicting heavy from `height` (in inches):  
+
+````
+stan_glm(formula = heavy ~ height, family=binomial(link="logit"), data=health)  
+              Median MAD_SD  
+(Intercept)  -21.51   1.60  
+height         0.28   0.02  
+````
+
+### (a) 
+Graph the logistic regression curve (the probability that someone is heavy) over the approximate range of the data. Be clear where the line goes through the 50% probability  point.  
+```{r}
+library(tidyverse)
+
+b0 <- -21.51
+b1 <-  0.28
+h50 <- -b0/b1 
+
+curve_df <- tibble(height = seq(58, 80, by = 0.1)) |>
+  mutate(p = plogis(b0 + b1*height))
+
+ggplot(curve_df, aes(height, p)) +
+  geom_line(size = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  geom_vline(xintercept = h50, linetype = "dotted") +
+  annotate("point", x = h50, y = 0.5, size = 2) +
+  annotate("text", x = h50 + 0.5, y = 0.52,
+           label = sprintf("50%% at %.2f in", h50), hjust = 0) +
+  scale_y_continuous(limits = c(0,1),
+                     labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Fitted logistic regression: P(heavy) vs. height",
+       x = "Height (inches)", y = "Probability heavy")
+#the curve is the fitted logistic and the vertical line hits the 50% point at 76.82 in (where the logit is 0)
+
+```
+
+### (b) 
+Fill in the blank: near the 50% point, comparing two people who differ by one inch in height, you'll expect a difference of __0.07__ in the probability of being heavy. 
+
+
+## 13.8 Linear transformations
+In the regression from the previous exercise, suppose you replaced  height in inches by height in centimeters. What would then be the intercept and slope? 
+With height in **cm**,
+
+$$
+\operatorname{logit}\{P(\text{heavy}=1)\}
+= -21.51 + \frac{0.28}{2.54}\, h_{\text{cm}}
+\approx -21.51 + 0.11024\, h_{\text{cm}}.
+$$
+
+Equivalently,
+
+$$
+P(\text{heavy}=1)
+= \text{logit}^{-1}\!\left(-21.51 + 0.11024\, h_{\text{cm}}\right)
+= \frac{1}{1+\exp\!\big(21.51 - 0.11024\, h_{\text{cm}}\big)}.
+$$So with height in centimeters:
+
+Intercept: −21.51 (unchanged).
+
+Slope:0.28/2.54≈0.11024 per cm.
+ 
+## 13.10 Expressing a comparison of proportions as a logistic regression
+A randomized experiment is performed within a survey, and 1000 people are contacted. Half the people contacted are promised a $5 incentive to participate, and half are not promised an incentive. The result is a 50% response rate among the treated group and 40% response rate among the control group.  
+
+### (a) 
+Set up these results as data in R. From these data, fit a logistic regression of response on the treatment indicator.  
+```{r}
+n_treat  <- 500; y_treat  <- 0.50 * n_treat  
+n_ctrl   <- 500; y_ctrl   <- 0.40 * n_ctrl 
+
+df <- data.frame(
+  treat   = c(0, 1),        
+  success = c(y_ctrl, y_treat),
+  failure = c(n_ctrl - y_ctrl, n_treat - y_treat)
+)
+
+m <- glm(cbind(success, failure) ~ treat, data = df,
+         family = binomial(link = "logit"))
+summary(m)
+dat <- data.frame(
+  treat    = rep(c(0,1), each = 500),
+  response = c(rep(1,200), rep(0,300),  
+               rep(1,250), rep(0,250))  
+)
+m2 <- glm(response ~ treat, data = dat, family = binomial())
+summary(m2)
+
+```
+
+### (b) 
+Compare to the results from Exercise 4.1. 
+for 4.1, estimate(ATE) = 0.1, SE= 0.0313, 95%CI =[0.039,0.161]
+for 13.7:
+95% CI for log-OR: 0.40547±1.96×0.12780=[0.1549,0.6561]
+95% CI for OR: exp(⋅)=[1.17,1.93]
+ATE = 0.1
+Both approaches agree on the probability-scale effect: ATE 
+=
+0.10
+=0.10 with similar uncertainty and significance.
+
+The difference is scale of reporting:
+
+Exercise 4.1 reports a difference in proportions (0.10).
+
+Exercise 13.10 reports a log-odds ratio / odds ratio (β1​≈0.4055,OR≈1.50)
+
+## 13.11 Building a logistic regression model
+The folder `Rodents` contains data on rodents in a sample of New York City apartments.  
+
+### (a) 
+Build a logistic regression model to predict the presence of rodents (the variable `rodent2` in the dataset) given indicators for the ethnic groups (`race`). Combine categories as appropriate.  Discuss the estimated coefficients in the model.  
+
+```{r}
+
+library(tidyverse)
+library(forcats)
+library(arm)
+library(broom)
+
+rodents <- read.table(
+  "https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Rodents/rodents.dat",
+  header = TRUE
+)
+names(rodents)
+rodents <- rodents %>%
+  mutate(
+    race_raw = tolower(trimws(race)),
+    race2 = case_when(
+      race_raw == "white"    ~ "White",
+      race_raw == "black"    ~ "Black",
+      race_raw == "hispanic" ~ "Hispanic",
+      TRUE                   ~ "Other"
+    ) %>% factor()
+  )
+if (nlevels(rodents$race2) < 2) {
+  message("race2 collapsed to 1 level; switching to frequency-driven grouping.")
+  rodents <- rodents %>%
+    mutate(
+      race2 = fct_lump_n(factor(race_raw), n = 3, other_level = "other") |> 
+              fct_recode(White = "white", Black = "black", Hispanic = "hispanic", Other = "other") |>
+              fct_drop()
+    )
+}
+if ("Black" %in% levels(rodents$race2)) {
+  rodents <- rodents %>% mutate(race2 = fct_relevel(race2, "Black"))
+}
+rodents <- droplevels(rodents)
+print(table(rodents$race2, useNA = "ifany"))
+print(table(rodents$rodent2, useNA = "ifany"))
+stopifnot(nlevels(rodents$race2) >= 2)   # fail-fast with a clear message if still broken
+
+fit1 <- glm(rodent2 ~ race2, data = rodents, family = binomial)
+summary(fit1)
+display(fit1)
+tidy(fit1, conf.int = TRUE, exponentiate = TRUE) %>%
+  mutate(across(c(estimate, conf.low, conf.high), ~ round(.x, 3))) %>%
+  arrange(term) %>%
+  print(n = Inf)
+
+#The negative coefficients for White, Hispanic, and Other indicate lower log-odds of rodent problems compared with Black households.
+#Exponentiating the coefficients gives odds ratios < 1, meaning the odds of reporting rodents are smaller for those groups.
+#A logistic regression predicting the presence of rodents from race shows that White and Hispanic households have significantly lower odds of reporting rodents (odds ratios ≈ 0.5–0.6).
+```
+
+### (b) 
+Add to your model some other potentially relevant predictors describing the apartment, building, and community district. Build your model using the general principles explained in Section 12.6. Discuss the coefficients for the ethnicity indicators in your model. 
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(arm)
+df_b <- rodents %>%
+  mutate(
+    personrm   = suppressWarnings(as.numeric(personrm)),   
+    numunits   = suppressWarnings(as.numeric(numunits)),  
+    stories    = suppressWarnings(as.numeric(stories)),    
+    poverty    = suppressWarnings(as.numeric(poverty)),    
+    duration   = suppressWarnings(as.numeric(duration)),  
+    dilap      = suppressWarnings(as.numeric(dilap)),      
+    struct     = suppressWarnings(as.numeric(struct)),     
+    intcrack2  = suppressWarnings(as.numeric(intcrack2)),  
+    inthole2   = suppressWarnings(as.numeric(inthole2)),  
+    intleak2   = suppressWarnings(as.numeric(intleak2))    
+  ) %>%
+  dplyr::select(
+    rodent2, race2, personrm, numunits, stories, poverty, duration,
+    dilap, struct, intcrack2, inthole2, intleak2
+  ) %>%
+  tidyr::drop_na() %>%
+  mutate(race2 = droplevels(race2)) 
+
+fit_b <- glm(
+  rodent2 ~ race2 + personrm + numunits + stories + poverty + duration +
+    dilap + struct + intcrack2 + inthole2 + intleak2,
+  data = df_b, family = binomial
+)
+
+
+cat("\n=== Part (b) summary ===\n")
+summary(fit_b)
+display(fit_b)
+
+#Adding apartment, building, and neighborhood predictors greatly improved the model (Δ Deviance ≈ 335, p < 0.001).
+#Crowding (personrm), number of units, and interior damage indicators (intcrack2, inthole2, intleak2) were all strong positive predictors of rodent presence, while taller buildings and good structure were protective.
+#Race coefficients decreased only slightly and remained significant, implying that even after accounting for housing conditions, reported rodent problems still differed by race.
+```
+
+
+## 14.3 Graphing logistic regressions
+The well-switching data described in Section 13.7 are in the folder `Arsenic`.
+
+### (a)
+Fit a logistic regression for the probability of switching using log (distance to nearest safe well) as a predictor.
+
+```{r}
+library(tidyverse)
+library(broom)
+
+wells <- read.csv(
+  "https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Arsenic/data/wells.csv"
+)
+
+wells <- wells %>%
+  mutate(
+    log_dist = log(dist),
+    switch = as.integer(switch) 
+  )
+
+m1 <- glm(switch ~ log_dist, data = wells, family = binomial(link = "logit"))
+
+summary(m1)
+#The fitted model shows that as the distance to the nearest safe well increases, the probability of switching wells decreases.
+#Near a 1 m distance, the predicted switching rate is about 73%, while households several hundred meters away have much lower predicted probabilities.
+#The effect of distance is highly significant (p < 0.001), confirming a strong inverse relationship between proximity to a safe well and the likelihood of switching.
+```
+
+### (b)
+Make a graph similar to Figure 13.8b displaying Pr(switch) as a function of distance to  nearest safe well, along with the data.
+
+```{r}
+curve_df <- wells %>%
+  arrange(dist) %>%
+  mutate(p_hat = predict(m1, type = "response"))
+
+ggplot(wells, aes(x = dist, y = switch)) +
+  geom_jitter(height = 0.05, width = 0, alpha = 0.2, color = "gray40") +
+  geom_line(data = curve_df, aes(x = dist, y = p_hat), color = "blue", linewidth = 1) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent_format()) +
+  labs(
+    title = "Probability of Switching vs. Distance to Nearest Safe Well",
+    x = "Distance to nearest safe well (m)",
+    y = "Predicted Pr(switch)"
+  ) +
+  theme_minimal()
+#Figure shows that the predicted probability of switching wells decreases as the distance to the nearest safe well increases. The logistic regression curve (blue) fits the data well, with households within a few meters of a safe well having roughly 70 % chance of switching, compared with about 50 % at distances greater than 200 m. This supports the interpretation of the negative coefficient on log(distance) from part (a).
+```
+
+### (c)
+Make a residual plot and binned residual plot as in Figure 14.8.
+
+```{r}
+res_df <- augment(m1) %>%
+  mutate(resid = .resid, p_hat = .fitted)
+
+ggplot(res_df, aes(x = p_hat, y = resid)) +
+  geom_hline(yintercept = 0, color = "gray60", linetype = "dashed") +
+  geom_point(alpha = 0.3) +
+  labs(title = "Residuals vs. Fitted (logistic model)",
+       x = "Fitted probability", y = "Raw residual") +
+  theme_minimal()
+
+library(arm)
+arm::binnedplot(x = fitted(m1), y = resid(m1),
+                xlab = "Fitted probability",
+                ylab = "Residual",
+                main = "Binned residual plot")
+#Both residual plots indicate that the logistic regression with log(distance) fits the data reasonably well.
+#Residuals are centered around zero with no strong trend, implying the logit transformation appropriately models the relationship between distance and the probability of switching.
+```
+
+### (d)
+Compute the error rate of the fitted model and compare to the error rate of the null model.
+
+```{r}
+
+pred_class <- as.integer(fitted(m1) > 0.5)
+true_class <- wells$switch
+
+err_model <- mean(pred_class != true_class)
+
+null_class <- as.integer(mean(true_class) > 0.5)  
+err_null <- mean(null_class != true_class)
+
+cat(sprintf("Error rate (logistic model): %.3f\n", err_model))
+cat(sprintf("Error rate (null model): %.3f\n", err_null))
+#the error rate of logistic model and null model is very close, meaning that while the model detects a statistically significant relationship, its predictive accuracy is only marginally better than guessing the majority outcome.
+```
+
+### (e)
+Create indicator variables corresponding to `dist < 100`; `dist` between 100 and 200; and `dist > 200`. Fit a logistic regression for Pr(switch) using these indicators. With this new model, repeat the computations and graphs for part (a) of this exercise.
+
+```{r}
+wells <- wells %>%
+  mutate(
+    dist_grp = case_when(
+      dist < 100 ~ "<100",
+      dist >= 100 & dist <= 200 ~ "100–200",
+      dist > 200 ~ ">200"
+    ),
+    dist_grp = factor(dist_grp, levels = c("<100", "100–200", ">200"))
+  )
+
+m2 <- glm(switch ~ dist_grp, data = wells, family = binomial(link = "logit"))
+
+pred_df <- data.frame(dist_grp = levels(wells$dist_grp))
+pred_df$p_hat <- predict(m2, newdata = pred_df, type = "response")
+
+ggplot(wells, aes(x = dist_grp, y = switch)) +
+  geom_jitter(width = 0.1, height = 0.05, alpha = 0.2, color = "gray40") +
+  geom_point(
+    data = pred_df,
+    aes(x = dist_grp, y = p_hat),
+    color = "blue", size = 3,
+    inherit.aes = FALSE
+  ) +
+  geom_line(
+    data = pred_df,
+    aes(x = dist_grp, y = p_hat, group = 1),
+    color = "blue", linewidth = 1,
+    inherit.aes = FALSE
+  ) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent_format()) +
+  labs(
+    title = "Switching Probability by Distance Group",
+    x = "Distance group (m)",
+    y = "Predicted Pr(switch)"
+  ) +
+  theme_minimal()
+#logit{P(switch=1)}=β0​+β1​I(100–200 m)+β2​I(>200 m)
+#The indicator-variable model confirms that the probability of switching decreases as distance increases. Households within 100 m of a safe well have about a 60 % chance of switching, compared with about 45 % for those 100–200 m away and only 25 % for those farther than 200 m. This stepwise pattern agrees closely with the smooth decline observed in the log-distance model, reinforcing the conclusion that greater distance to a safe well discourages switching.
+```
+
+
+## 14.7 Model building and comparison
+Continue with the well-switching data described in the previous exercise.
+
+### (a)
+Fit a logistic regression for the probability of switching using, as predictors, distance, log(arsenic), and their interaction. Interpret the estimated coefficients and their standard errors.
+
+```{r}
+library(tidyverse)
+library(broom)
+
+wells <- read.csv("https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Arsenic/data/wells.csv")
+
+wells <- wells %>%
+  mutate(
+    log_arsenic = log(arsenic),
+    switch = as.integer(switch)
+  )
+m_int <- glm(switch ~ dist * log_arsenic,
+             data = wells,
+             family = binomial(link = "logit"))
+
+summary(m_int)
+#When dist = 0 and arsenic = 1 (since log(1) = 0), the log-odds of switching are 0.491
+#Holding arsenic constant (log_arsenic = 0 → arsenic = 1 ppm), for every 1 m increase in distance, the log-odds of switching decrease by 0.0087
+#For a fixed distance (dist = 0), a 1-unit increase in log(arsenic)—which corresponds to multiplying arsenic by e≈2.718—increases the log-odds by 0.983.
+#The interaction between distance and arsenic is negative but not statistically significant (p = 0.206).
+
+#Intercept SE = 0.068The baseline log-odds (0.491) is estimated precisely.95 % CI ≈ 0.491 ± 1.96×0.068 → [0.36, 0.62].
+#dist SE = 0.00134Extremely small relative to its estimate (−0.0087), so the distance effect is very precisely estimated.95 % CI ≈ −0.0087 ± 1.96×0.00134 → [−0.0113, −0.0061].Strong evidence that the slope is negative.
+#log_arsenic SE = 0.110Larger in absolute terms, but relative to its coefficient (0.983/0.110 ≈ 9.0), still highly significant.95 % CI ≈ [0.77, 1.20]; we’re very confident arsenic has a positive effect.
+#interaction SE = 0.00183The estimate (−0.0023) is small compared with its SE → z = −1.26, p = 0.206, so the interaction is not statistically significant.This wide SE tells us the data provide weak evidence for any interaction effect.
+```
+
+### (b)
+Make graphs as in Figure 14.3 to show the relation between probability of switching, distance, and arsenic level.
+
+```{r}
+curve_df <- expand_grid(
+  dist = seq(0, 300, by = 5),
+  arsenic = c(0.5, 1.0, 2.0)
+)
+
+curve_df$log_arsenic <- log(curve_df$arsenic)
+curve_df$p_hat <- predict(m_int, newdata = curve_df, type = "response")
+ggplot(curve_df, aes(x = dist, y = p_hat, color = factor(arsenic))) +
+  geom_line(linewidth = 1) +
+  scale_color_brewer(palette = "Dark2", name = "Arsenic level (ppm)") +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  labs(
+    title = "Predicted Probability of Switching vs. Distance",
+    subtitle = "Separate curves for different arsenic levels",
+    x = "Distance to nearest safe well (m)",
+    y = "Predicted Pr(switch)"
+  ) +
+  theme_minimal()
+#Figure 14.7b displays the fitted probabilities of switching wells as a function of the distance to the nearest safe well, for three different arsenic concentrations (0.5 ppm, 1 ppm, 2 ppm).
+#Each curve slopes downward, showing that households located farther from a safe well are less likely to switch.
+#Across all distances, the probability of switching is higher for higher arsenic levels: when arsenic doubles from 1 ppm to 2 ppm, the probability of switching increases by roughly 20–25 percentage points near short distances.
+#The roughly parallel curves indicate that the interaction between distance and arsenic is weak, consistent with the nonsignificant interaction term in the model output.
+
+```
+
+
+### (c)
+Following the procedure described in Section 14.4, compute the average predictive differences corresponding to:  
+
+i. A comparison of `dist` = 0 to `dist` = 100, with `arsenic` held constant.  
+ii. A comparison of `dist` = 100 to `dist` = 200, with `arsenic` held constant.  
+iii. A comparison of `arsenic` = 0.5 to `arsenic` = 1.0, with `dist` held constant.  
+iv. A comparison of `arsenic` = 1.0 to `arsenic` = 2.0, with `dist` held constant.  
+
+Discuss these results. 
+
+```{r}
+avg_pred_diff <- function(model, data, var, val1, val2, fixed) {
+  d1 <- data; d1[[var]] <- val1
+  d2 <- data; d2[[var]] <- val2
+  if (!is.null(fixed)) {
+    for (nm in names(fixed)) {
+      d1[[nm]] <- fixed[[nm]]
+      d2[[nm]] <- fixed[[nm]]
+    }
+  }
+  mean(predict(model, newdata = d2, type = "response") -
+         predict(model, newdata = d1, type = "response"))
+}
+apd_i  <- avg_pred_diff(m_int, wells, "dist", 0, 100,
+                        list(arsenic = median(wells$arsenic)))
+apd_ii <- avg_pred_diff(m_int, wells, "dist", 100, 200,
+                        list(arsenic = median(wells$arsenic)))
+
+apd_iii <- avg_pred_diff(m_int, wells, "arsenic", 0.5, 1.0,
+                         list(dist = median(wells$dist)))
+
+apd_iv  <- avg_pred_diff(m_int, wells, "arsenic", 1.0, 2.0,
+                         list(dist = median(wells$dist)))
+
+c(APD_dist0_100 = apd_i,
+  APD_dist100_200 = apd_ii,
+  APD_ars05_1 = apd_iii,
+  APD_ars1_2 = apd_iv)
+#The average predictive difference calculations show that distance has a major impact on switching behavior: increasing the distance from 0 to 200 m reduces the predicted probability of switching by roughly 40 percentage points. In contrast, changes in arsenic concentration from 0.5 to 2 ppm have negligible effect on predicted switching when distance is held constant. These results confirm that the distance to a safe well is the dominant factor influencing households’ switching decisions in this dataset.
+```

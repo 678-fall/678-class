@@ -1,0 +1,487 @@
+---
+title: "MA678 Homework 5"
+author: "ZHIXUAN GUAN"
+date: "10/25/2025"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 15.1 Poisson and negative binomial regression
+The folder `RiskyBehavior` contains data from a randomized trial targeting couples at high risk of HIV infection. The intervention provided counseling sessions regarding practices that could reduce their likelihood of contracting HIV. Couples were randomized either to a control group, a group in which just the woman participated, or a group in which both members of the couple participated. One of the outcomes examined after three months was "number of unprotected sex acts."  
+
+### a) 
+Model this outcome as a function of treatment assignment using a Poisson regression. Does the model fit well? Is there evidence of overdispersion?  
+
+```{r}
+library(tidyverse)
+library(AER)
+
+risky <- read.csv("risky.csv")  
+str(risky)
+
+
+m1 <- glm(fupacts ~ women_alone + couples,
+          data = risky, family = poisson)
+
+summary(m1)
+
+
+deviance(m1) / df.residual(m1)
+
+dispersiontest(m1)
+#Treatment effect:Both interventions significantly reduced unprotected sex acts.
+#Model fit:Very poor under Poisson; variance ≈ 44 × larger than  we should use negative binomial regression
+```
+
+### b) 
+Next extend the model to include pre-treatment measures of the outcome and the additional pre-treatment variables included in the dataset. Does the model fit well? Is there evidence of overdispersion?  
+
+```{r}
+library(tidyverse)
+library(AER)
+
+
+m2 <- glm(fupacts ~ women_alone + couples + bupacts + sex + bs_hiv,
+          data = risky, family = poisson)
+
+summary(m2)
+deviance(m2) / df.residual(m2)
+dispersiontest(m2)
+exp(coef(m2))
+#After controlling for baseline unprotected sex acts, gender, and HIV status,both interventions — woman-only and couples counseling — were associated with significant reductions in the number of unprotected sex acts.However, the model remains strongly overdispersed (variance ≈ 30× larger than mean), suggesting the Poisson distribution is not adequate for these data.
+```
+
+### c) 
+Fit a negative binomial (overdispersed Poisson) model. What do you conclude regarding effectiveness of the intervention?
+
+```{r}
+library(MASS)
+
+m3 <- glm.nb(fupacts ~ women_alone + couples + bupacts + sex + bs_hiv,
+             data = risky)
+
+summary(m3)
+exp(coef(m3))
+deviance(m3) / df.residual(m3)
+m3$theta
+AIC(m1, m2, m3)
+#The Negative Binomial model fits the data well and properly accounts for overdispersion.
+#Both treatment groups still show a reduction in unprotected sex acts relative to control, though:
+#The woman-only intervention remains clearly significant and substantial (≈50% reduction).
+#The couple intervention shows a smaller, borderline-significant reduction (≈30%).
+#Baseline behavior (bupacts) is a strong positive predictor — behavior patterns persist.
+#HIV-positive individuals tend to report fewer acts (likely due to greater risk awareness).
+#Gender has no significant effect after adjustment.
+```
+
+### d) 
+These data include responses from both men and women from the participating couples. Does this give you any concern with regard to our modeling assumptions?
+
+the concern is dependence within couples
+The dataset includes:
+
+Both men and women from the same couples.
+
+Each person provides their own count of unprotected sex acts (fupacts).
+
+The predictors include whether the couple or the woman alone received counseling.
+
+That means that for many rows, two observations (one man, one woman) come from the same intervention unit — the same couple.
+
+```{r}
+
+```
+
+
+## 15.3 Binomial regression
+Redo the basketball shooting example on page 270, making some changes:  
+
+### (a) 
+Instead of having each player shoot 20 times, let the number of shots per player vary, drawn from the uniform distribution between 10 and 30.  
+```{r}
+set.seed(1234)
+library(tidyverse)
+library(rstanarm) 
+
+
+N <- 100
+height <- rnorm(N, mean = 72, sd = 3)          
+n <- sample(10:30, N, replace = TRUE)    
+p <- 0.4 + 0.1 * (height - 72) / 3
+
+
+y <- rbinom(N, size = n, prob = p)
+data_a <- tibble(n, y, height)
+
+fit_a <- stan_glm(
+  cbind(y, n - y) ~ height,
+  data   = data_a,
+  family = binomial(link = "logit"),
+  prior  = normal(0, 2.5, autoscale = TRUE),
+  prior_intercept = normal(0, 5, autoscale = TRUE),
+  seed = 1234,
+  refresh = 0
+)
+
+print(fit_a, digits = 3)
+#Check the implied probabilities:at 69″: plogis(−10.469+0.14⋅69)≈0.308,at 72″: plogis(−10.469+0.14⋅72)≈∗∗0.404, which is close to 30% for 69, 40 for 72
+```
+
+### (b) 
+Instead of having the true probability of success be linear, have the true probability be a logistic function, set so that Pr(success) = 0.3 for a player who is 5'9" and 0.4 for a 6' tall player. 
+
+```{r}
+logit <- function(p) log(p / (1 - p))
+h1 <- 69; p1 <- 0.30
+h2 <- 72; p2 <- 0.40
+eta1 <- logit(p1); eta2 <- logit(p2)
+beta_true  <- (eta2 - eta1) / (h2 - h1)
+alpha_true <- eta1 - beta_true * h1
+alpha_true; beta_true
+
+N <- 100
+height <- rnorm(N, mean = 72, sd = 3)
+n     <- sample(10:30, N, replace = TRUE)
+p     <- plogis(alpha_true + beta_true * height)
+y     <- rbinom(N, size = n, prob = p)
+data_b <- tibble(n, y, height, p_true = p)
+
+
+fit_b <- stan_glm(
+  cbind(y, n - y) ~ height,
+  data   = data_b,
+  family = binomial(link = "logit"),
+  prior  = normal(0, 2.5, autoscale = TRUE),
+  prior_intercept = normal(0, 5, autoscale = TRUE),
+  seed = 5678,
+  refresh = 0
+)
+print(fit_b, digits = 3)
+
+#for 69:plogis(−11.542+0.155⋅69)≈∗∗0.300∗∗ for 72:plogis(−11.542+0.155⋅72)≈∗∗0.406∗∗, which is close to 30% for 69, 40 for 72
+```
+
+
+## 15.7 Tobit model for mixed discrete/continuous data
+Experimental data from the National Supported  Work example are in the folder `Lalonde`. Use the treatment indicator and pre-treatment variables to predict post-treatment (1978) earnings using a Tobit model. Interpret the model coefficients. 
+
+```{r}
+library(haven)
+library(AER)
+df<- read_dta("NSW_dw_obs.dta")
+
+m_tobit <- tobit(
+  re78 ~ treat + age + educ + black + hisp + married + nodegree + re74 + re75,
+  data = df,
+  left = 0
+)
+
+summary(m_tobit)
+#(Intercept)4,523 Baseline latent earnings (reference group: untreated, non-Black, non-Hispanic, unmarried, has degree, average age & prior earnings).
+#treat +596:The training program group had $596 higher latent earnings than control, but not statistically significant (p = 0.38).
+#age :Each additional year of age decreases expected latent earnings by $158, holding others constant (significant, p < 0.001).
+#educ:Each additional year of education increases latent earnings by about $208 (strongly significant, p < 0.001)
+#black:Being Black is associated with about $435 lower latent earnings (significant, p = 0.045).
+#hisp:$6 increase for being a hisp,but Not significant; Hispanic participants do not differ from non-Hispanic (p = 0.98).
+#married:Being married is associated with about $116 lower latent earnings (not significant, p = 0.46).
+#nodegree:positive and significant — those without a degree show higher latent earnings, likely because this variable overlaps with other factors or coding differences. Worth checking (maybe nodegree=1 means “no degree,” but the relationship flips if education already included).
+#re74	+0.34	:Each additional $1 in 1974 earnings predicts $0.34 more in 1978 earnings (significant, p < 0.001).
+#re75 :Each additional $1 in 1975 earnings predicts $0.57 more in 1978 earnings (significant, p < 0.001).
+```
+
+
+## 15.8 Robust linear regression using the t model
+The folder `Congress` has the votes for the Democratic and Republican candidates in each U.S. congressional district in 1988, along with the parties' vote proportions in 1986 and an indicator for whether the incumbent was running for reelection in 1988. For your analysis, just use the elections that were contested by both parties in both years.  
+
+```{r}
+```
+
+### (a) 
+Fit a linear regression using `stan_glm` with the usual normal-distribution model for the errors predicting 1988 Democratic vote share from the other variables and assess model fit.
+
+```{r}
+library(tidyverse)
+library(rstanarm)
+
+cong <- read.csv("https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Congress/data/congress.csv")
+str(cong)
+
+
+fit_norm <- stan_glm(
+  v88 ~ v86 + inc88,
+  data = cong,
+  family = gaussian(),
+  prior = normal(0, 2.5, autoscale = TRUE),
+  prior_intercept = normal(0, 5, autoscale = TRUE),
+  seed = 123,
+  refresh = 0
+)
+
+print(fit_norm, digits = 3)
+
+pp_check(fit_norm)
+#this is not very good linear fit overall, but it assumes Normal errors (thin tails) Normal model is not robust to outliers — a few unusual districts heavily influence the fitted variance
+```
+
+### (b) 
+Fit the same sort of model using the `brms` package with a $t$ distribution, using the `brm` function with the student family. Again assess model fit.  
+
+```{r}
+library(brms)
+
+fit_t <- brm(
+  v88 ~ v86 + inc88,
+  data = cong,
+  family = student(),
+  prior = c(
+    prior(normal(0, 2.5), class = "b"),
+    prior(normal(0, 5), class = "Intercept")
+  ),
+  seed = 123,
+  cores = 4,
+  refresh = 0
+)
+
+summary(fit_t)
+pp_check(fit_t)
+loo_compare(loo(fit_norm), loo(fit_t))
+#The replicated curves (y_rep) now match the dark observed curve (y) much more closely, especially in the tails.
+#That means the t model successfully captures the heavy-tailed nature of the vote-share distribution (some very safe districts, some tight races).
+```
+
+### (c) 
+Which model do you prefer? 
+student t model. It down-weights extreme residuals Much better tail fit
+also, the Student-t robust regression outperformed the normal-error model (elpd difference = 15 ± 9), indicating better predictive fit and robustness to outliers. Combined with the posterior predictive checks showing improved tail behavior, we prefer the Student-t model for these congressional-district vote data.
+
+## 15.9 Robust regression for binary data using the robit model
+Use the same data as the previous example with the goal instead of predicting for each district whether it was won by the Democratic or Republican candidate.  
+
+### (a) 
+Fit a standard logistic or probit regression and assess model fit.
+
+```{r}
+library(tidyverse)
+
+cong_use <- cong %>%
+  mutate(
+    dem_win88 = if_else(v88 > 0.5, 1, 0)
+  )
+table(cong_use$dem_win88)
+library(rstanarm)
+
+fit_logit <- stan_glm(
+  dem_win88 ~ v86 + inc88,
+  data = cong_use,
+  family = binomial(link = "logit"),
+  seed = 1234,
+  refresh = 0
+)
+print(fit_logit, digits = 3)
+pp_check(fit_logit)
+#the model look good, fit well in most places except the tail
+```
+
+### (b) 
+Fit a robit regression and assess model fit.
+
+```{r}
+library(brms)
+library(tidyverse)
+cong <- read.csv("https://raw.githubusercontent.com/avehtari/ROS-Examples/master/Congress/data/congress.csv")
+
+
+dat <- cong %>%
+  mutate(dem_win88 = as.integer(v88 > 0.5))
+table(dat$dem_win88)
+
+fit_cauchit <- brm(
+  dem_win88 ~ v86 + inc88,
+  data = dat,
+  family = bernoulli(link = "cauchit"),
+  prior = c(
+    prior(normal(0, 5), class = "b"),
+    prior(normal(0, 5), class = "Intercept")
+  ),
+  seed = 1234, cores = 4, refresh = 0
+)
+
+summary(fit_cauchit)
+pp_check(fit_cauchit)
+
+library(loo)
+loo_logit   <- loo(fit_logit)
+loo_cauchit <- loo(fit_cauchit)
+print(loo_compare(loo_cauchit, loo_logit), simplify = FALSE)
+#the regression model fit much better in tail
+
+```
+
+### (c) 
+Which model do you prefer? 
+robit regression model. the tail looks much better.
+
+## 15.14 Model checking for count data
+The folder `RiskyBehavior` contains data from a study of behavior of couples at risk for HIV; see Exercise 15.1. 
+
+### (a) 
+Fit a Poisson regression predicting number of unprotected sex acts from baseline HIV status. Perform predictive simulation to generate 1000 datasets and record the percentage of observations that are equal to 0 and the percentage that are greater than 10 (the third quartile in the observed data) for each. Compare these to the observed value in the original data.
+
+```{r}
+library(tidyverse)
+library(MASS) 
+
+risky <- read.csv("risky.csv")  
+str(risky)
+summary(risky$fupacts)
+m_pois <- glm(fupacts ~ bs_hiv, data = risky, family = poisson)
+summary(m_pois)
+prop_0_obs  <- mean(risky$fupacts == 0)
+prop_10_obs <- mean(risky$fupacts > 10)
+prop_0_obs; prop_10_obs
+
+
+set.seed(123)
+n_sim <- 1000
+n_obs <- nrow(risky)
+
+lambda_hat <- fitted(m_pois)
+sim_data <- replicate(n_sim, rpois(n_obs, lambda_hat))
+prop_0_sim  <- apply(sim_data, 2, function(y) mean(y == 0))
+prop_10_sim <- apply(sim_data, 2, function(y) mean(y > 10))
+
+
+mean(prop_0_sim); mean(prop_10_sim)
+quantile(prop_0_sim, c(.025, .5, .975))
+quantile(prop_10_sim, c(.025, .5, .975))
+tibble(prop_0_sim, prop_10_sim) %>%
+  ggplot(aes(x = prop_0_sim)) +
+  geom_histogram(bins = 40, fill = "gray70") +
+  geom_vline(xintercept = prop_0_obs, color = "red", linewidth = 1.2) +
+  labs(title = "Posterior predictive check: zeros (Poisson)",
+       x = "Proportion of zeros (simulated)", y = "Frequency")
+
+#he red line (observed) is far outside the histogram, model fit is poor — likely overdispersion
+
+```
+
+### (b) 
+Repeat (a) using a negative binomial (overdispersed Poisson) regression.
+
+```{r}
+m_nb <- glm.nb(fupacts ~ bs_hiv, data = risky)
+summary(m_nb)
+
+lambda_hat_nb <- fitted(m_nb)
+
+sim_data_nb <- replicate(n_sim, rnbinom(n_obs, mu = lambda_hat_nb, size = m_nb$theta))
+
+prop_0_sim_nb  <- apply(sim_data_nb, 2, function(y) mean(y == 0))
+prop_10_sim_nb <- apply(sim_data_nb, 2, function(y) mean(y > 10))
+
+
+mean(prop_0_sim_nb); mean(prop_10_sim_nb)
+quantile(prop_0_sim_nb, c(.025, .5, .975))
+quantile(prop_10_sim_nb, c(.025, .5, .975))
+tibble(prop_0_sim_nb) %>%
+  ggplot(aes(x = prop_0_sim_nb)) +
+  geom_histogram(bins = 40, fill = "gray70") +
+  geom_vline(xintercept = prop_0_obs, color = "red", linewidth = 1.2) +
+  labs(title = "Posterior predictive check: zeros (NegBin)",
+       x = "Proportion of zeros (simulated)", y = "Frequency")
+#the Negative Binomial reproduces both the zeros and the heavy right tail much better than the Poisson.
+```
+
+### (c) 
+Repeat (b), also including ethnicity and baseline number of unprotected sex acts as inputs.
+
+```{r}
+m_nb2 <- glm.nb(fupacts ~ bs_hiv + sex + bupacts, data = risky)
+summary(m_nb2)
+
+lambda_hat_nb2 <- fitted(m_nb2)
+
+sim_data_nb2 <- replicate(n_sim, rnbinom(n_obs, mu = lambda_hat_nb2, size = m_nb2$theta))
+prop_0_sim_nb2  <- apply(sim_data_nb2, 2, function(y) mean(y == 0))
+prop_10_sim_nb2 <- apply(sim_data_nb2, 2, function(y) mean(y > 10))
+
+tibble(prop_0_sim_nb) %>%
+  ggplot(aes(x = prop_0_sim_nb2)) +
+  geom_histogram(bins = 40, fill = "gray70") +
+  geom_vline(xintercept = prop_0_obs, color = "red", linewidth = 1.2) +
+  labs(title = "Posterior predictive check: zeros (NegBin with more)",
+       x = "Proportion of zeros (simulated)", y = "Frequency")
+#look worse than (b)
+```
+
+
+## 15.15 Summarizing inferences and predictions using simulation
+Exercise 15.7 used a Tobit model to fit a regression with an outcome that had mixed discrete and continuous data. In this exercise you will revisit these data and build a two-step model: 
+(1) logistic regression for zero earnings versus positive earnings, and 
+(2) linear regression for level of earnings given earnings are positive. 
+Compare predictions that result from each of these models with each other. 
+
+```{r}
+library(tidyverse)
+library(haven)
+
+df <- read_dta("NSW_dw_obs.dta")
+
+str(df)
+summary(df$re78)
+df <- df %>% mutate(pos_earn = as.integer(re78 > 0))
+#logit model
+m_logit <- glm(
+  pos_earn ~ treat + age + educ + black + hisp + married + nodegree + re74 + re75,
+  data = df,
+  family = binomial(link = "logit")
+)
+
+summary(m_logit)
+
+#linear
+m_lm <- lm(
+  re78 ~ treat + age + educ + black + hisp + married + nodegree + re74 + re75,
+  data = subset(df, re78 > 0)
+)
+
+summary(m_lm)
+#simulation
+set.seed(123)
+
+p_pos <- predict(m_logit, type = "response")           
+earn_pos <- predict(m_lm, newdata = df)                
+earn_pred <- p_pos * earn_pos
+df$earn_pred <- earn_pred
+
+library(AER)
+m_tobit <- tobit(
+  re78 ~ treat + age + educ + black + hisp + married + nodegree + re74 + re75,
+  left = 0, data = df
+)
+
+summary(m_tobit)
+
+# Tobit predictions
+df$tobit_pred <- predict(m_tobit, type = "response")
+
+tibble(
+  Tobit = df$tobit_pred,
+  TwoStep = df$earn_pred
+) %>%
+  pivot_longer(everything(), names_to = "Model", values_to = "Pred") %>%
+  ggplot(aes(x = Pred, fill = Model)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Predicted earnings distributions",
+    x = "Predicted 1978 earnings",
+    y = "Density"
+  )
+#Green/blue area (TwoStep) and pink area (Tobit) overlap almost entirely.
+#Both capture the heavy right tail (a few high earners).
+#Near zero, the Tobit density is slightly sharper — because it treats zeros as censoring rather than a separate process.
+#The Two-step model allows a flatter mass near zero, reflecting that some zeros come from “not working” rather than censoring.
+```

@@ -1,0 +1,584 @@
+---
+title: "MA678 Homework 6"
+author: "Your Name"
+date: "11/8/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,out.width="0.9\\linewidth",dev="pdf",fig.align  = 'center')
+library(ggplot2)
+library(knitr)
+library(arm)
+library(data.table)
+library(foreign)
+library(car)
+library(faraway)
+library(nnet)
+library(reshape2)
+library(VGAM)
+library(tidyverse)
+library(MASS)
+```
+
+## Multinomial logit
+Using the individual-level survey data from the 2000 National Election Study (data in folder NES), predict party identification (which is on a five-point scale) using ideology and demographics with an ordered multinomial logit model.
+```{r, echo=FALSE}
+nes<- read.table("https://raw.githubusercontent.com/avehtari/ROS-Examples/refs/heads/master/NES/data/nes.txt",header = TRUE)
+nes_clean <- nes %>%
+  mutate(
+    partyid5 = case_when(
+      partyid7 %in% c(1, 2) ~ 1,  # Democrat
+      partyid7 == 3 ~ 2,           # Lean Democrat
+      partyid7 == 4 ~ 3,           # Independent
+      partyid7 == 5 ~ 4,           # Lean Republican
+      partyid7 %in% c(6, 7) ~ 5,   # Republican
+      TRUE ~ NA_real_
+    ),
+    partyid5 = factor(partyid5, levels = 1:5, 
+                      labels = c("Democrat", "Lean Dem", "Independent", 
+                                "Lean Rep", "Republican"))
+  ) %>%
+  filter(!is.na(partyid5), !is.na(real_ideo))
+nes_model <- nes_clean %>%
+  select(partyid5, real_ideo, age_discrete, educ1, gender, race_adj, income) %>%
+  na.omit()
+
+
+# # view(nes)
+#  head(nes)
+# str(nes)
+```
+
+1. Summarize the parameter estimates numerically and also graphically. 
+```{r}
+# Fit ordered logistic regression model using polr from MASS
+model_polr <- polr(partyid5 ~ real_ideo + age_discrete + educ1 + 
+                    gender + race_adj + income, 
+                   data = nes_model, 
+                   Hess = TRUE)
+
+# Summary of model
+summary(model_polr)
+
+# Get coefficient table with standard errors and t-values
+coef_table <- summary(model_polr)$coefficients
+print(coef_table)
+
+# Separate predictors from cutpoints
+# Predictors are the first rows (before the "|" cutpoints)
+n_predictors <- length(coef(model_polr))
+n_cutpoints <- nrow(coef_table) - n_predictors
+
+# Extract only predictor coefficients (not cutpoints)
+predictor_coefs <- coef_table[1:n_predictors, , drop = FALSE]
+
+# Calculate confidence intervals (only for predictors typically)
+conf_int <- confint(model_polr)
+print(conf_int)
+
+# Check dimensions and match appropriately
+if (nrow(conf_int) == n_predictors) {
+  # confint only returns predictor CIs
+  predictor_confint <- conf_int
+} else {
+  # confint returns all CIs (predictors + cutpoints)
+  predictor_confint <- conf_int[1:n_predictors, , drop = FALSE]
+}
+
+# Create a comprehensive results table for PREDICTORS only
+results_df <- data.frame(
+  Variable = rownames(predictor_coefs),
+  Coefficient = predictor_coefs[, "Value"],
+  Std_Error = predictor_coefs[, "Std. Error"],
+  t_value = predictor_coefs[, "t value"],
+  Lower_CI = predictor_confint[, 1],
+  Upper_CI = predictor_confint[, 2],
+  Odds_Ratio = exp(predictor_coefs[, "Value"])
+)
+
+print(kable(results_df, digits = 3, 
+            caption = "Ordered Logistic Regression Results - Predictor Variables"))
+
+# Also create a table for cutpoints (without CIs if not available)
+cutpoint_coefs <- coef_table[(n_predictors + 1):nrow(coef_table), , drop = FALSE]
+
+cutpoint_df <- data.frame(
+  Cutpoint = rownames(cutpoint_coefs),
+  Value = cutpoint_coefs[, "Value"],
+  Std_Error = cutpoint_coefs[, "Std. Error"],
+  t_value = cutpoint_coefs[, "t value"]
+)
+
+# Try to add cutpoint CIs if available
+if (nrow(conf_int) > n_predictors) {
+  cutpoint_confint <- conf_int[(n_predictors + 1):nrow(conf_int), , drop = FALSE]
+  cutpoint_df$Lower_CI <- cutpoint_confint[, 1]
+  cutpoint_df$Upper_CI <- cutpoint_confint[, 2]
+}
+
+print(kable(cutpoint_df, digits = 3, 
+            caption = "Ordered Logistic Regression Results - Cutpoints"))
+#graph
+coef_df <- results_df %>%
+  filter(!grepl("\\|", Variable))  # Exclude cutpoints
+
+ggplot(coef_df, aes(x = Coefficient, y = Variable)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = Lower_CI, xmax = Upper_CI), height = 0.2) +
+  labs(title = "Coefficient Estimates with 95% Confidence Intervals",
+       subtitle = "Ordered Logistic Regression: Party ID ~ Ideology + Demographics",
+       x = "Coefficient Estimate",
+       y = "") +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold"))
+
+# Odds ratio plot
+ggplot(coef_df, aes(x = Odds_Ratio, y = Variable)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_point(size = 3, color = "darkblue") +
+  geom_errorbarh(aes(xmin = exp(Lower_CI), xmax = exp(Upper_CI)), 
+                 height = 0.2, color = "darkblue") +
+  labs(title = "Odds Ratios with 95% Confidence Intervals",
+       subtitle = "Effect on Odds of Higher Party ID Category",
+       x = "Odds Ratio",
+       y = "") +
+  scale_x_log10() +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+2. Explain the results from the fitted model.
+```{r}
+ideology_range <- seq(min(nes_model$real_ideo), 
+                      max(nes_model$real_ideo), 
+                      length.out = 100)
+
+# Create prediction data (holding other variables at their means/modes)
+pred_data <- data.frame(
+  real_ideo = ideology_range,
+  age_discrete = median(nes_model$age_discrete),
+  educ1 = median(nes_model$educ1),
+  gender = names(which.max(table(nes_model$gender))),
+  race_adj = names(which.max(table(nes_model$race_adj))),
+  income = median(nes_model$income)
+)
+
+# Get predicted probabilities
+pred_probs <- predict(model_polr, newdata = pred_data, type = "probs")
+pred_df <- cbind(pred_data, pred_probs)
+
+# Reshape for plotting
+pred_long <- pred_df %>%
+  select(real_ideo, Democrat:`Republican`) %>%
+  pivot_longer(cols = -real_ideo, 
+               names_to = "Party", 
+               values_to = "Probability")
+
+pred_long$Party <- factor(pred_long$Party, 
+                          levels = c("Democrat", "Lean Dem", "Independent", 
+                                    "Lean Rep", "Republican"))
+
+# Plot predicted probabilities by ideology
+ggplot(pred_long, aes(x = real_ideo, y = Probability, color = Party)) +
+  geom_line(linewidth = 1.2) +
+  labs(title = "Predicted Probabilities of Party ID by Ideology",
+       subtitle = "Holding other variables at typical values",
+       x = "Ideology (Liberal to Conservative)",
+       y = "Predicted Probability",
+       color = "Party ID") +
+  scale_color_manual(values = c("blue", "lightblue", "gray", 
+                                "lightcoral", "red")) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "right")
+```
+
+### Interpretation of Results:
+
+```{r q2-text-interpretation}
+# Extract key coefficients
+ideo_coef <- coef(model_polr)["real_ideo"]
+ideo_or <- exp(ideo_coef)
+
+cat("Key Findings:\n\n")
+cat("1. IDEOLOGY (real_ideo):\n")
+cat(sprintf("   - Coefficient: %.3f\n", ideo_coef))
+cat(sprintf("   - Odds Ratio: %.3f\n", ideo_or))
+cat("   - Interpretation: For each one-unit increase in ideology\n")
+cat("     (moving more conservative), the odds of being in a higher\n")
+cat(sprintf("     party ID category increase by a factor of %.2f.\n", ideo_or))
+cat("   - This is the strongest predictor, showing ideology is highly\n")
+cat("     associated with party identification.\n\n")
+
+# Test overall model fit
+cat("2. MODEL FIT:\n")
+cat(sprintf("   - AIC: %.1f\n", AIC(model_polr)))
+cat(sprintf("   - Residual Deviance: %.1f\n", deviance(model_polr)))
+```
+
+3. Use a binned residual plot to assess the fit of the model.
+```{r}
+library(arm)   
+
+pred_probs <- predict(model_polr, type = "probs")
+
+y_num <- as.numeric(nes_model$partyid5)
+
+expected_score <- as.numeric(pred_probs %*% (1:ncol(pred_probs)))
+
+residuals_score <- y_num - expected_score
+
+binnedplot(x = expected_score,
+           y = residuals_score,
+           main = "Binned Residual Plot – Ordered Logit Model",
+           xlab = "Expected Party ID (Predicted Score)",
+           ylab = "Observed – Expected",
+           nclass = 20)
+#half of the point is out of the box, indicating the ordered logistic model doesn't fit well
+```
+
+
+
+## (Optional) Choice models
+Using the individual-level survey data from the election example described in Section 10.9 (data available in the folder NES), 
+
+```{r}
+
+```
+
+
+1. Fit a logistic regression model for the choice of supporting Democrats or Republicans. Then interpret the output from this regression in terms of a utility/choice model.
+```{r}
+
+```
+
+2. Repeat the previous exercise but now with three options: Democrat, no opinion, Republican. That is, fit an ordered logit model and then express it as a utility/choice mode
+```{r}
+
+```
+
+
+## Contingency table and ordered logit model
+In a prospective study of a new living attenuated recombinant vaccine for influenza, patients were randomly allocated to two groups, one of which was given the new vaccine and the other a saline placebo. The responses were titre levels of hemaglutinin inhibiting antibody found in the blood six weeks after vaccination; they were categorized as "small", "medium" or "large". 
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{rrrrr}
+  \hline
+treatment & small & moderate & large & Total \\ 
+  \hline
+placebo &  25 &   8 &   5 & 38 \\ 
+ vaccine &   6 &  18 &  11 & 35 \\ 
+   \hline
+\end{tabular}
+\end{table}
+The cell frequencies in the rows of table are constrained to add to the number of subjects in each treatment group (35 and 38 respectively). We want to know if the pattern of responses is the same for each treatment group.
+
+```{r,echo=FALSE}
+# Build the contingency table (rows sum to given totals)
+
+tab <- matrix(c(25, 8, 5,
+6, 18, 11),
+nrow = 2, byrow = TRUE,
+dimnames = list(
+treatment = c("placebo","vaccine"),
+response  = c("small","moderate","large")
+))
+tab
+
+```
+
+1. Using a chi-square test and an appropriate log-linear model, test the hypothesis that the distribution of responses is the same for the placebo and vaccine groups.
+```{r}
+chisq_res <- chisq.test(tab, correct = FALSE)
+chisq_res
+df_long <- as.data.frame(as.table(tab))
+names(df_long) <- c("treatment","response","count")
+
+fit_homog <- glm(count ~ treatment + response, data = df_long, family = poisson)
+fit_sat <- glm(count ~ treatment * response, data = df_long, family = poisson)
+anova(fit_homog, fit_sat, test = "Chisq")
+#Both the Pearson and Likelihood-ratio tests give highly significant results (p < 0.001).
+#Therefore, we reject the null hypothesis that the distribution of response categories (small/moderate/large) is the same for both treatment groups.
+```
+
+2. For the model corresponding to the hypothesis of homogeneity of response distributions, calculate the fitted values, the Pearson and deviance residuals, and the goodness of fit statistics $X^2$ and $D$. Which of the cells of the table contribute most to $X^2$ and $D$? Explain and interpret these results.
+```{r}
+fv <- fitted(fit_homog)
+pear <- residuals(fit_homog, type = "pearson")
+devr <- residuals(fit_homog, type = "deviance")
+X2 <- sum(pear^2)
+D <- sum(devr^2)
+df_res <- fit_homog$df.residual
+p_X2 <- pchisq(X2, df = df_res, lower.tail = FALSE)
+p_D <- pchisq(D, df = df_res, lower.tail = FALSE)
+
+gof <- tibble(
+Statistic = c("Pearson X^2","Deviance D","df","p-value (X^2)","p-value (D)"),
+Value = c(X2, D, df_res, p_X2, p_D)
+)
+contrib <- tibble(df_long, fitted = fv,
+pearson_resid = pear,
+deviance_resid = devr,
+pearson_contrib = pear^2,
+deviance_contrib = devr^2) %>%
+arrange(desc(pearson_contrib))
+
+kable(contrib, digits = 3, caption = "Fitted values and residuals under homogeneity (no interaction)")
+kable(gof, digits = 3, caption = "Goodness-of-fit statistics for homogeneity model")
+#The homogeneity (no-interaction) log-linear model fits poorly (Pearson X² = 17.65, df = 2, p < 0.001; Deviance = 18.64, p < 0.001).
+#The largest residuals occur in the small response category: the vaccine group shows far fewer small responses and the placebo group far more than expected under homogeneity.
+#These deviations indicate that the vaccine substantially increases antibody titres, producing more moderate and large responses relative to placebo.
+```
+
+3. Re-analyze these data using ordered logit model (use `polr`) to estimate the cut-points of a latent continuous response variable and to estimate a location shift between the two treatment groups. Sketch a rough diagram to illustrate the model which forms the conceptual base for this analysis.
+```{r}
+# Treat response as ordered outcome and use group counts as weights
+
+ord_dat <- df_long %>%
+mutate(response = factor(response, levels = c("small","moderate","large"), ordered = TRUE),
+treatment = factor(treatment))
+
+# Proportional-odds ordered logit with treatment as predictor
+
+m_ord <- polr(response ~ treatment, data = ord_dat, weights = count, Hess = TRUE)
+
+summary(m_ord)
+
+summ <- coef(summary(m_ord))
+est  <- summ[, "Value"]
+se   <- summ[, "Std. Error"]
+terms_vec <- rownames(summ)
+
+# Try profile-likelihood CIs first; fall back to Wald if needed
+co_ci_try <- try(confint(m_ord), silent = TRUE)
+
+if (inherits(co_ci_try, "try-error") || is.null(dim(co_ci_try))) {
+  # Wald CIs (works for any number of params)
+  ci_df <- data.frame(
+    term = terms_vec,
+    lwr  = est - 1.96 * se,
+    upr  = est + 1.96 * se,
+    row.names = NULL
+  )
+} else {
+  ci_df <- data.frame(
+    term = rownames(co_ci_try),
+    lwr  = co_ci_try[, 1],
+    upr  = co_ci_try[, 2],
+    row.names = NULL
+  )
+}
+
+library(dplyr)
+
+out_est <- data.frame(
+  term = terms_vec,
+  estimate = est,
+  se = se,
+  row.names = NULL
+) %>%
+  left_join(ci_df, by = "term") %>%
+  mutate(
+    OR     = ifelse(grepl("^treatment", term), exp(estimate), NA_real_),
+    OR_lwr = ifelse(grepl("^treatment", term), exp(lwr), NA_real_),
+    OR_upr = ifelse(grepl("^treatment", term), exp(upr), NA_real_)
+  )
+
+out_est
+#All three analyses (chi-square, log-linear, and ordered logit) tell the same story—the vaccine substantially increases antibody titres relative to placebo, consistent with a strong immunogenic effect.
+```
+
+
+## High School and Beyond 
+The `hsb` data was collected as a subset of the High School and Beyond study conducted by the National Education Longitudinal Studies program of the National Center for Education Statistics. The variables are gender; race; socioeconomic status; school type; chosen high school program type; scores on reading, writing, math, science, and social studies. We want to determine which factors are related to the choice of the type of program—academic, vocational, or general—that the students pursue in high school. The response is multinomial with three levels.
+
+```{r}
+library(faraway)
+data(hsb)
+str(hsb)
+summary(hsb)
+
+data(hsb)
+?hsb
+```
+
+1. Fit a trinomial response model with the other relevant variables as predictors (untransformed).
+```{r}
+library(nnet)
+
+
+m_hsb <- multinom(prog ~ gender + race + ses + schtyp + read + write + math + science + socst,
+data = hsb, trace = FALSE)
+
+summary(m_hsb)
+
+```
+
+2. For the student with id 99, compute the predicted probabilities of the three possible choices.
+```{r}
+row99 <- hsb %>% filter(id == 99)
+row99
+
+pred_99 <- predict(m_hsb, newdata = row99, type = "probs")
+pred_99
+#p(academic)=50.76%,p(general)=37.53%,p(vocation)=11.7%
+```
+
+
+## Happiness
+Data were collected from 39 students in a University of Chicago MBA class and may be found in the dataset `happy`.
+```{r}
+library(faraway)
+data(happy)
+```
+
+1. Build a model for the level of happiness as a function of the other variables.
+```{r}
+library(MASS)
+
+
+names(happy)
+
+happy <- within(happy, {
+  happy <- ordered(happy, levels = sort(unique(happy)))
+})
+
+
+
+m_happy <- polr(happy ~ money + sex + love+work, data = happy, Hess = TRUE)
+summary(m_happy)
+
+```
+
+2. Interpret the parameters of your chosen model.
+```{r}
+#Each $1,000 (if units are 1 = $1 k) increases the odds of being happier by ≈ 2 %
+#having sex increases the odds of being happier by 0.62%
+#being in love multiplies odds of higher happiness by ~36.9%
+#having a job increases the odds of being happier by 2.43%
+```
+
+3. Predict the happiness distribution for subject whose parents earn $30,000 a year,
+who is lonely, not sexually active and has no job.
+```{r}
+new_student <- data.frame(
+  money = 30,
+  sex   = 0,
+  love  = 0,
+  work  = 0
+)
+predict(m_happy, newdata = new_student, type = "probs")
+#The probability mass is almost entirely at happiness = 2.
+#That means this student is predicted to be very unhappy, with about a 99% chance of falling in one of the lowest happiness categories.
+```
+
+## Newspaper survey on Vietnam War
+A student newspaper conducted a survey of student opinions about the Vietnam War in May 1967. Responses were classified by sex, year in the program and one of four opinions. The survey was voluntary. The data may be found in the dataset `uncviet`.  Treat the opinion as the response and the sex and year as predictors. Build a proportional odds model, giving an interpretation to the estimates.
+
+```{r}
+data(uncviet)
+str(uncviet)
+library(MASS)
+
+uncviet <- uncviet |> 
+  mutate(policy = ordered(policy, levels = c("A","B","C","D")))
+
+m_uncviet <- polr(policy ~ sex + year, data = uncviet,
+                  weights = y, Hess = TRUE)
+summary(m_uncviet)
+
+```
+interpretation:
+| Predictor      | Estimate | Std.Error | t value | Interpretation                                           
+| **sexMale**    | −0.647   | 0.085     | −7.61   | Males are **less likely** to choose more supportive (later) policies than females             |
+| **yearGrad**   | +1.177   | 0.102     | 11.51   | Graduate students are **more likely** to choose more supportive policies compared to freshmen |
+| **yearJunior** | +0.396   | 0.110     | 3.61    | Juniors more supportive than freshmen                                                         |
+| **yearSenior** | +0.544   | 0.112     | 4.84    | Seniors more supportive than freshmen                                                         |
+| **yearSoph**   | +0.132   | 0.115     | 1.15    | Sophomores slightly more supportive (not significant)                                         |
+
+## Pneumonoconiosis of coal miners
+The pneumo data gives the number of coal miners classified by radiological examination into one of three categories of pneumonoconiosis and by the number of years spent working at the coal face divided into eight categories.
+
+```{r}
+data(pneumo, package = "faraway")
+str(pneumo)
+```
+
+1. Treating the pneumonoconiosis status as response variable as nominal, build a model for predicting the frequency of the three outcomes in terms of length of service and use it to predict the outcome for a miner with 25 years of service.
+```{r}
+library(nnet)
+data(pneumo, package="faraway")
+
+m_nom <- multinom(status ~ year, data = pneumo, weights = Freq, trace = FALSE)
+summary(m_nom)
+
+#predict 25 years
+newdata <- data.frame(year = 25)
+predict(m_nom, newdata, type = "probs")
+#Probability:     mild=9.14%     normal=82.78%     severe=8.07 
+
+```
+
+2. Repeat the analysis with the pneumonoconiosis status being treated as ordinal. 
+```{r}
+library(MASS)
+
+pneumo$status <- ordered(pneumo$status, levels = c("normal", "mild", "severe"))
+
+m_ord <- polr(status ~ year, data = pneumo, weights = Freq, Hess = TRUE)
+summary(m_ord)
+#predict 25 years
+predict(m_ord, newdata = newdata, type = "probs")
+#  probability:  normal=0.82610096       mild= 0.09601474     severe= 0.07788430  
+
+```
+
+3. Now treat the response variable as hierarchical with top level indicating whether
+the miner has the disease and the second level indicating, given they have the
+disease, whether they have a moderate or severe case. 
+```{r}
+library(dplyr)
+
+df1 <- pneumo |>
+group_by(year) |>
+summarise(
+diseased = sum(Freq[status != "normal"]),
+normal   = sum(Freq[status == "normal"])
+)
+
+m_disease <- glm(cbind(diseased, normal) ~ year, data = df1, family = binomial)
+summary(m_disease)
+
+
+df2 <- pneumo |>
+filter(status != "normal") |>
+group_by(year) |>
+summarise(
+severe = sum(Freq[status == "severe"]),
+mild   = sum(Freq[status == "mild"])
+)
+
+m_severe <- glm(cbind(severe, mild) ~ year, data = df2, family = binomial)
+summary(m_severe)
+
+```
+
+4. Compare the three analyses.
+```{r}
+
+```
+All three models show probability of disease increases strongly with years.
+
+The ordinal and hierarchical Stage 1 models give nearly identical year effects (~ 0.096).
+
+The hierarchical Stage 2 model shows a positive but weaker trend toward severe cases among the diseased group.
+
+The nominal model’s flexibility does not change the overall message but adds noise and parameters.
+| Model Type             | Key Output    | AIC           | Interpretation of Year Coefficient                                                                           
+| **Nominal (multinom)** | year coefficients: Normal = −0.0836 **, Severe = +0.0257 (NS)** | 425.45        | As years increase, miners are much less likely to remain *Normal*; the *Severe* category shows a mild positive trend.    |
+| **Ordinal (polr)**     | year = 0.0959 ***                                               | 422.92        | Each additional year increases the odds of being in a higher severity class by exp(0.0959) ≈ **1.10** (≈ 10 % increase). |
+| **Hierarchical**       | Stage 1: year = 0.0963 ***; Stage 2: year = 0.035 (NS)**        | 41.41 + 25.04 | First stage: odds of any disease ↑ 10 % / yr; second stage: odds of *severe vs mild* ↑ 4 % / yr (not significant).       |
+

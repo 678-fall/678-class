@@ -1,0 +1,824 @@
+---
+title: "baseball"
+format: pdf
+editor: visual
+---
+
+## 
+
+loading packages
+
+```{r}
+library(standardize)
+library(tidyverse)
+library(readr)
+library(Lahman)
+library(mice)
+library(lmerTest)
+library(parameters)
+library(naniar)
+library(MuMIn)
+library(performance)
+```
+
+batters data processing and imputation
+
+```{r}
+# 1.Lahman People -> BBRef IDs
+id_map <- Lahman::People %>%
+  select(playerID, bbrefID) %>%
+  filter(!is.na(bbrefID))
+
+# 2. Load WAR data
+url_bat <- "https://www.baseball-reference.com/data/war_daily_bat.txt"
+bwar_raw <- read_csv(url_bat, na = "NULL")
+
+# 3. Aggregate WAR without destroying missing salary
+bwar_seasons <- bwar_raw %>%
+  filter(lg_ID %in% c("AL", "NL")) %>%   # MLB only
+  group_by(player_ID, year_ID) %>%
+  summarise(
+    WAR         = sum(WAR, na.rm = TRUE),
+    PA          = sum(PA,  na.rm = TRUE),
+
+    # preserve missing salary in group:
+    salary_bwar = if (all(is.na(salary))) NA_real_ else sum(salary, na.rm = TRUE),
+
+    teamID_bwar = first(team_ID),
+    lgID_bwar   = first(lg_ID),
+    .groups = "drop"
+  )
+
+# 4. Add lagged WAR values + years played
+bwar_seasons <- bwar_seasons %>%
+  arrange(player_ID, year_ID) %>%
+  group_by(player_ID) %>%
+  mutate(
+    WAR_lag1_raw = lag(WAR, 1),
+    WAR_lag2_raw = lag(WAR, 2),
+    years_played = row_number() - 1
+  ) %>%
+  ungroup() %>%
+  mutate(
+    WAR_lag1 = if_else(is.na(WAR_lag1_raw), 0, WAR_lag1_raw),
+    WAR_lag2 = if_else(is.na(WAR_lag2_raw), WAR_lag1, WAR_lag2_raw)
+  )
+
+# 5. Build dataset for missing-data tests (keep NA in salary_raw)
+batters_raw_model <- bwar_seasons %>%
+  filter(year_ID >= 1970,
+         PA >= 100) %>%
+
+  # Map BBRef ID -> Lahman playerID
+  left_join(id_map, by = c("player_ID" = "bbrefID")) %>%
+
+  # Join Lahman salaries (preserve NA)
+  left_join(
+    Lahman::Salaries %>%
+      rename(
+        salary_lahman = salary,
+        teamID_lahman = teamID,
+        lgID_lahman   = lgID
+      ),
+    by = c("playerID", "year_ID" = "yearID")
+  ) %>%
+
+  # Combine salary fields but keep missing as NA
+  mutate(
+    salary_raw = case_when(
+      !is.na(salary_lahman) ~ salary_lahman,
+      !is.na(salary_bwar)   ~ salary_bwar,
+      TRUE                  ~ NA_real_
+    ),
+    teamID = coalesce(teamID_lahman, teamID_bwar),
+    lgID   = coalesce(lgID_lahman, lgID_bwar),
+    yearID = year_ID
+  ) %>%
+  select(playerID, yearID, teamID, lgID,
+         WAR, WAR_lag1, PA, salary_raw, years_played)
+
+# 6. Mark missing salaries and prepare for imputation
+batters_imp <- batters_raw_model %>%
+  mutate(
+    imputed_flag = if_else(salary_raw <= 0 | is.na(salary_raw),
+                           TRUE, FALSE),
+    salary = if_else(salary_raw <= 0 | is.na(salary_raw),
+                     NA_real_, salary_raw)
+  )
+
+sum(is.na(batters_imp$salary))
+
+# 7. Prepare data for mice (only salary imputed)
+imp_data <- batters_imp %>%
+  select(salary, WAR_lag1, WAR, PA, yearID, teamID, lgID, years_played) %>%
+  mutate(
+    teamID = as.factor(teamID),
+    lgID   = as.factor(lgID)
+  )
+
+meth <- make.method(imp_data)
+meth[] <- ""              # default: don't impute anything
+meth["salary"] <- "pmm"   # only salary is imputed
+
+pred <- make.predictorMatrix(imp_data)
+pred[,] <- 0
+pred["salary", c("WAR_lag1", "WAR", "PA", "yearID", "teamID", "lgID", "years_played")] <- 1
+
+set.seed(2025)
+imp <- mice(
+  imp_data,
+  m = 5,
+  method = meth,
+  predictorMatrix = pred,
+  maxit = 10,
+  printFlag = FALSE
+)
+
+imp_completed <- complete(imp, 1)   # first imputed dataset
+
+# 8. Final batters_df for modeling
+batters_df <- batters_imp %>%
+  mutate(
+    salary     = imp_completed$salary,
+    log_salary = log(salary)
+  ) %>%
+  select(playerID, yearID, teamID, lgID,
+         WAR, WAR_lag1, PA, salary, log_salary, imputed_flag, years_played)
+
+# Correlation Check for Batters
+# Insert immediately after batters_df is created
+# -------------------------------------------------------
+
+batters_cor_vars <- batters_df %>%
+  select(log_salary, salary, WAR, WAR_lag1, years_played, PA, yearID) %>%
+  mutate(across(everything(), as.numeric))
+
+batters_cor_matrix <- cor(batters_cor_vars, use = "pairwise.complete.obs")
+
+print(round(batters_cor_matrix, 3))
+
+# 9. Missingness diagnostics
+dim(batters_raw_model)
+vis_miss(batters_raw_model)
+
+mean(is.na(batters_raw_model$salary_raw))
+sum(is.na(batters_raw_model$salary_raw))
+```
+
+batters imputed distribution check
+
+```{r}
+# 10. Distribution: Imputed vs Observed Salaries
+# Make sure imputed_flag is logical
+batters_df <- batters_df %>%
+  mutate(imputed_flag = as.logical(imputed_flag))
+
+# 10.1 Density of salary (log scale on x)
+ggplot(batters_df, aes(x = salary, color = imputed_flag)) +
+  geom_density() +
+  scale_x_log10() +
+  labs(
+    title = "Salary Distribution: Imputed vs Observed",
+    x = "Salary (log scale)",
+    color = "Imputed?"
+  ) +
+  theme_minimal()
+
+# 10.2 Density of log_salary (no transform needed)
+ggplot(batters_df, aes(x = log_salary, color = imputed_flag)) +
+  geom_density() +
+  labs(
+    title = "log(Salary) Distribution: Imputed vs Observed",
+    x = "log(Salary)",
+    color = "Imputed?"
+  ) +
+  theme_minimal()
+
+
+
+# 10.4 Numeric summaries
+obs_salary <- batters_df$salary[!batters_df$imputed_flag]
+imp_salary <- batters_df$salary[ batters_df$imputed_flag]
+
+summary(obs_salary)
+summary(imp_salary)
+
+var_obs <- var(obs_salary, na.rm = TRUE)
+var_imp <- var(imp_salary, na.rm = TRUE)
+
+var_obs
+var_imp
+
+# 10.5 Kolmogorov–Smirnov test: Observed vs Imputed salaries (not used in report)
+ks.test(
+  obs_salary,
+  imp_salary
+)
+```
+
+batters modeling and testing
+
+```{r}
+set.seed(123)
+
+# 80% train, 20% test
+train_index <- sample(nrow(batters_df), size = 0.8 * nrow(batters_df))
+
+train_df <- batters_df[train_index, ]
+test_df  <- batters_df[-train_index, ]
+
+
+train_complete <- lm(
+  log_salary ~ WAR_lag1 + years_played + PA + yearID,
+  data = train_df
+)
+train_no <- lm(
+  log_salary ~ WAR_lag1+ years_played + PA + yearID + factor(teamID),
+  data = train_df
+)
+#partial model with WAR
+train_partial <- lmer(
+  log_salary ~ WAR+WAR_lag1 + years_played + PA + yearID +
+    (1 | teamID),
+  data = train_df,
+  REML = TRUE
+)
+#paritial model without PA
+partial_noPA<- lmer(
+  log_salary ~ WAR_lag1 + years_played + yearID + (1 | teamID),
+  data = train_df
+)
+#partial model without WAR, the most ideal one
+final_partial <- lmer(
+  log_salary ~ WAR_lag1 + years_played +PA+ yearID + (1 | teamID),
+  data = train_df
+)
+summary(train_complete)
+summary(train_no)
+summary(train_partial)
+summary(partial_noPA)
+summary(final_partial)
+
+
+# Calculate RMSE
+rmse_complete <- sqrt(mean((test_df$log_salary - predict(train_complete, newdata=test_df))^2))
+
+rmse_nopool   <- sqrt(mean((test_df$log_salary - predict(train_no, newdata=test_df))^2))
+
+rmse_partial  <- sqrt(mean((test_df$log_salary -
+                            predict(train_partial, newdata=test_df, allow.new.levels=TRUE))^2))
+rmse_final  <- sqrt(mean((test_df$log_salary - predict(final_partial, newdata=test_df))^2))
+rmse_noPA  <- sqrt(mean((test_df$log_salary - predict(partial_noPA, newdata=test_df))^2))
+mean_log_salary <- mean(train_df$log_salary, na.rm = TRUE)
+
+test_df$pred_nomodel <- mean_log_salary
+
+rmse_nomodel <- sqrt(mean((test_df$log_salary - test_df$pred_nomodel)^2, na.rm = TRUE))
+rmse_complete
+rmse_nopool
+rmse_final
+rmse_nomodel
+rmse_partial
+rmse_noPA
+summary(train_complete)$r.squared
+summary(train_no)$r.squared
+r.squaredGLMM(final_partial)
+r.squaredGLMM(train_partial)
+
+icc(train_partial)
+icc(final_partial)
+```
+
+batters residual fitted qq plot
+
+```{r}
+par(mfrow = c(1, 2))
+
+# Residuals vs fitted
+plot(fitted(train_complete), resid(train_complete),
+     xlab = "Fitted values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted (complete pooling)")
+abline(h = 0, col = "red", lty = 2)
+
+# Normal Q-Q plot
+qqnorm(resid(train_complete),
+       main = "Normal Q-Q (complete pooling)")
+qqline(resid(train_complete), col = "red", lty = 2)
+
+par(mfrow = c(1, 1))
+
+
+par(mfrow = c(1, 2))
+
+# Residuals vs fitted
+plot(fitted(final_partial), resid(final_partial),
+     xlab = "Fitted values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted (partial pooling)")
+abline(h = 0, col = "red", lty = 2)
+
+# Normal Q-Q plot
+qqnorm(resid(final_partial),
+       main = "Normal Q-Q (partial pooling)")
+qqline(resid(final_partial), col = "red", lty = 2)
+
+par(mfrow = c(1, 1))
+
+par(mfrow = c(1, 2))
+
+# Residuals vs fitted
+plot(
+  fitted(train_no), resid(train_no),
+  xlab = "Fitted values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted (No Pooling)",
+  pch = 20, col = rgb(0, 0, 0, 0.3)
+)
+abline(h = 0, col = "red", lty = 2)
+
+# Q-Q plot
+qqnorm(
+  resid(train_no),
+  main = "Normal Q-Q Plot (No Pooling)",
+  pch = 20, col = rgb(0, 0, 0, 0.3)
+)
+qqline(resid(train_no), col = "red", lty = 2)
+
+par(mfrow = c(1, 1))
+
+```
+
+batters variables distribution check
+
+```{r}
+theme_set(theme_minimal(base_size = 14))
+# Basic salary and log-salary
+ggplot(batters_raw_model, aes(x = salary_raw)) +
+  geom_histogram(bins = 50) +
+  labs(title = "Distribution of salary (batters)", x = "salary")
+
+ggplot(batters_df, aes(x = log_salary)) +
+  geom_histogram(bins = 50) +
+  labs(title = "Distribution of log(salary) (batters)", x = "log_salary")
+
+# WAR and lagged WAR
+ggplot(batters_df, aes(x = WAR)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of WAR (batters)", x = "WAR")
+
+ggplot(batters_df, aes(x = WAR_lag1)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of lagged WAR (batters)", x = "WAR_lag1")
+
+# Plate Appearances
+ggplot(batters_df, aes(x = PA)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of PA (batters)", x = "PA")
+
+# Years played
+ggplot(batters_df, aes(x = years_played)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of years played (batters)", x = "years_played")
+
+# Year ID
+ggplot(batters_df, aes(x = yearID)) +
+  geom_histogram(binwidth = 2) +
+  labs(title = "Distribution of seasons (batters)", x = "yearID")
+# log_salary boxplot
+ggplot(batters_df, aes(y = log_salary)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of log(salary) (batters)", y = "log_salary")
+
+ggplot(batters_df, aes(y = WAR)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of WAR (batters)", y = "WAR")
+
+ggplot(batters_df, aes(y = WAR_lag1)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of lagged WAR (batters)", y = "WAR_lag1")
+
+ggplot(batters_df, aes(y = PA)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of PA (batters)", y = "PA")
+
+ggplot(batters_df, aes(y = years_played)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of years played (batters)", y = "years_played")
+ggplot(batters_df, aes(x = WAR_lag1, y = log_salary)) +
+  geom_point(alpha = 0.3) +
+  labs(title = "log(salary) vs lagged WAR (batters)",
+       x = "WAR_lag1", y = "log_salary")
+
+ggplot(batters_df, aes(x = years_played, y = log_salary)) +
+  geom_point(alpha = 0.3) +
+  labs(title = "log(salary) vs years played (batters)",
+       x = "years_played", y = "log_salary")
+
+ggplot(batters_df, aes(x = PA, y = log_salary)) +
+  geom_point(alpha = 0.3) +
+  labs(title = "log(salary) vs PA (batters)",
+       x = "PA", y = "log_salary")
+
+```
+
+pitcher data processing and imputation
+
+```{r}
+# 1. ID map: Lahman People -> BBRef IDs
+id_map <- Lahman::People %>%
+  select(playerID, bbrefID) %>%
+  filter(!is.na(bbrefID))
+
+# 2. Load PITCHER WAR data
+url_pit <- "https://www.baseball-reference.com/data/war_daily_pitch.txt"
+pwar_raw <- read_csv(url_pit, na = "NULL")
+
+# 3. Aggregate WAR *without wiping missing salary*
+pwar_seasons <- pwar_raw %>%
+  filter(lg_ID %in% c("AL", "NL")) %>%   # MLB only
+  group_by(player_ID, year_ID) %>%
+  summarise(
+    WAR         = sum(WAR, na.rm = TRUE),
+    IPouts      = sum(IPouts, na.rm = TRUE),  # workload proxy
+    salary_bwar = if (all(is.na(salary))) NA_real_ else sum(salary, na.rm = TRUE),
+    teamID_bwar = first(team_ID),
+    lgID_bwar   = first(lg_ID),
+    .groups = "drop"
+  )
+
+# 4. Add lagged WAR + years played
+pwar_seasons <- pwar_seasons %>%
+  arrange(player_ID, year_ID) %>%
+  group_by(player_ID) %>%
+  mutate(
+    WAR_lag1_raw = lag(WAR, 1),
+    WAR_lag2_raw = lag(WAR, 2),
+    years_played = row_number() - 1
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # treat rookie / no prior season as 0 WAR
+    WAR_lag1 = if_else(is.na(WAR_lag1_raw), 0, WAR_lag1_raw),
+    WAR_lag2 = if_else(is.na(WAR_lag2_raw), WAR_lag1, WAR_lag2_raw)
+  )
+
+# 5. Build pitcher modeling dataset preserving NA in salary
+pitchers_raw_model <- pwar_seasons %>%
+  filter(year_ID >= 1970,
+         IPouts >= 100) %>%   # ≈ 33 innings; adjust if needed
+
+  # map BBRef ID -> Lahman playerID
+  left_join(id_map, by = c("player_ID" = "bbrefID")) %>%
+
+  # join Lahman salaries
+  left_join(
+    Lahman::Salaries %>%
+      rename(
+        salary_lahman = salary,
+        teamID_lahman = teamID,
+        lgID_lahman   = lgID
+      ),
+    by = c("playerID", "year_ID" = "yearID")
+  ) %>%
+
+  mutate(
+    # combine salary sources, but keep true missing as NA
+    salary_raw = case_when(
+      !is.na(salary_lahman) ~ salary_lahman,
+      !is.na(salary_bwar)   ~ salary_bwar,
+      TRUE                  ~ NA_real_
+    ),
+    teamID = coalesce(teamID_lahman, teamID_bwar),
+    lgID   = coalesce(lgID_lahman, lgID_bwar),
+    yearID = year_ID
+  ) %>%
+  select(playerID, yearID, teamID, lgID,
+         WAR, WAR_lag1, IPouts, salary_raw, years_played)
+
+# 6. Mark missing salaries & prep for imputation
+pitchers_imp <- pitchers_raw_model %>%
+  mutate(
+    # treat salary <= 0 as missing, same as batters
+    imputed_flag = if_else(salary_raw <= 0 | is.na(salary_raw),
+                           TRUE, FALSE),
+    salary = if_else(salary_raw <= 0 | is.na(salary_raw),
+                     NA_real_, salary_raw)
+  )
+
+sum(is.na(pitchers_imp$salary))  # how many to impute
+
+# 7. Set up mice to impute ONLY salary using WAR_lag1, workload, etc.
+imp_vars_pitcher <- pitchers_imp %>%
+  select(salary, WAR_lag1, WAR, IPouts, yearID, years_played, teamID, lgID) %>%
+  mutate(
+    teamID = as.factor(teamID),
+    lgID   = as.factor(lgID)
+  )
+
+meth <- make.method(imp_vars_pitcher)
+meth[] <- ""                 # default: don't impute anything
+meth["salary"] <- "pmm"      # only salary is imputed
+
+pred <- make.predictorMatrix(imp_vars_pitcher)
+pred[,] <- 0
+pred["salary", c("WAR_lag1", "WAR", "IPouts", "yearID", "years_played", "teamID", "lgID")] <- 1
+
+set.seed(123)
+imp_pitcher <- mice(
+  imp_vars_pitcher,
+  method = meth,
+  predictorMatrix = pred,
+  m = 5,
+  maxit = 10,
+  printFlag = FALSE
+)
+
+imp_pit_completed <- complete(imp_pitcher, 1)
+
+# 8. Final pitcher modeling dataset
+pitchers_df <- pitchers_imp %>%
+  mutate(
+    salary     = imp_pit_completed$salary,
+    log_salary = log(salary)
+  ) %>%
+  select(playerID, yearID, teamID, lgID,
+         WAR, WAR_lag1, IPouts, salary, log_salary, imputed_flag, years_played)
+# Correlation Check for Pitchers
+# Insert immediately after pitchers_df is created
+# -------------------------------------------------------
+
+pitchers_cor_vars <- pitchers_df %>%
+  select(log_salary, salary, WAR, WAR_lag1, years_played, IPouts, yearID) %>%
+  mutate(across(everything(), as.numeric))
+
+pitchers_cor_matrix <- cor(pitchers_cor_vars, use = "pairwise.complete.obs")
+
+print(round(pitchers_cor_matrix, 3))
+# Make sure imputed_flag is logical
+pitchers_df <- pitchers_df %>%
+  mutate(imputed_flag = as.logical(imputed_flag))
+
+# 1) Density of salary (log scale on x)
+ggplot(pitchers_df, aes(x = salary, color = imputed_flag)) +
+  geom_density() +
+  scale_x_log10() +
+  labs(
+    title = "Pitchers: Salary Distribution (Imputed vs Observed)",
+    x = "Salary (log scale)",
+    color = "Imputed?"
+  ) +
+  theme_minimal()
+
+# 2) Density of log_salary
+ggplot(pitchers_df, aes(x = log_salary, color = imputed_flag)) +
+  geom_density() +
+  labs(
+    title = "Pitchers: log(Salary) Distribution (Imputed vs Observed)",
+    x = "log(Salary)",
+    color = "Imputed?"
+  ) +
+  theme_minimal()
+
+
+
+# 4) Numeric summaries
+obs_salary_pit <- pitchers_df$salary[!pitchers_df$imputed_flag]
+imp_salary_pit <- pitchers_df$salary[ pitchers_df$imputed_flag]
+
+summary(obs_salary_pit)
+summary(imp_salary_pit)
+
+var_obs_pit <- var(obs_salary_pit, na.rm = TRUE)
+var_imp_pit <- var(imp_salary_pit, na.rm = TRUE)
+
+var_obs_pit
+var_imp_pit
+
+# 5) KS test
+ks.test(
+  obs_salary_pit,
+  imp_salary_pit
+)
+```
+
+pitcher missingness detect
+
+```{r}
+dim(pitchers_raw_model)
+sum(is.na(pitchers_raw_model$salary_raw))
+mean(is.na(pitchers_raw_model$salary_raw))
+vis_miss(pitchers_raw_model)
+mcar_test(pitchers_raw_model)
+pitchers_raw_model %>%
+  group_by(yearID) %>%
+  summarize(
+    n = n(),
+    missing_salary = sum(is.na(salary_raw)),
+    pct_missing = mean(is.na(salary_raw))
+  )
+
+```
+
+pitcher modelling and testing
+
+```{r}
+set.seed(123)
+
+train_index <- sample(nrow(pitchers_df), size = 0.8 * nrow(pitchers_df))
+
+train_p <- pitchers_df[train_index, ]
+test_p  <- pitchers_df[-train_index, ]
+train_complete_p <- lm(
+  log_salary ~ WAR_lag1 + years_played + IPouts + yearID,
+  data = train_p
+)
+
+train_nopool_p <- lm(
+  log_salary ~ WAR_lag1 + years_played + IPouts + yearID + factor(teamID),
+  data = train_p
+)
+
+train_partial_p <- lmer(
+  log_salary ~ WAR_lag1 + years_played + IPouts + yearID + (1 | teamID),
+  data = train_p
+)
+summary(train_complete_p)
+summary(train_nopool_p)
+summary(train_partial_p)
+test_p$pred_complete <- predict(train_complete_p, newdata = test_p)
+test_p$pred_nopool   <- predict(train_nopool_p,   newdata = test_p)
+test_p$pred_partial  <- predict(train_partial_p,  newdata = test_p, allow.new.levels = TRUE)
+valid_rows <- complete.cases(test_p[, c("log_salary", "pred_complete", "pred_nopool", "pred_partial")])
+
+sum(!valid_rows)  # how many rows are excluded
+
+rmse_complete_p <- sqrt(mean((test_p$log_salary[valid_rows] - test_p$pred_complete[valid_rows])^2))
+rmse_nopool_p   <- sqrt(mean((test_p$log_salary[valid_rows] - test_p$pred_nopool[valid_rows])^2))
+rmse_partial_p  <- sqrt(mean((test_p$log_salary[valid_rows] - test_p$pred_partial[valid_rows])^2))
+
+
+rmse_complete_p
+rmse_nopool_p
+rmse_partial_p
+summary(train_complete_p)$r.squared
+summary(train_nopool_p)$r.squared
+r.squaredGLMM(train_partial_p)
+```
+
+pitch residual and qq plot
+
+```{r}
+pitch_complete <- lm(
+  log_salary ~ WAR_lag1 + years_played + IPouts + yearID,
+  data = pitchers_df
+)
+
+pitch_no <- lm(
+  log_salary ~ WAR_lag1 + years_played + IPouts + yearID + factor(teamID),
+  data = pitchers_df
+)
+
+pitch_partial <- lmer(
+  log_salary ~ WAR_lag1 + years_played + IPouts + yearID + (1 | teamID),
+  data = pitchers_df,
+  REML = TRUE
+)
+par(mfrow = c(1, 2))
+
+# Residuals vs Fitted
+plot(
+  pitch_complete$fitted.values,
+  resid(pitch_complete),
+  pch = 19, col = rgb(0,0,0,0.3),
+  xlab = "Fitted values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted (Pitchers, Complete Pooling)"
+)
+abline(h = 0, col = "red", lty = 2)
+
+# Normal Q–Q
+qqnorm(resid(pitch_complete),
+       main = "Normal Q-Q (Pitchers, Complete Pooling)")
+qqline(resid(pitch_complete), col = "red", lwd = 2)
+par(mfrow = c(1, 2))
+
+plot(
+  pitch_no$fitted.values,
+  resid(pitch_no),
+  pch = 19, col = rgb(0,0,0,0.3),
+  xlab = "Fitted values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted (Pitchers, No Pooling)"
+)
+abline(h = 0, col = "red", lty = 2)
+
+qqnorm(resid(pitch_no),
+       main = "Normal Q-Q (Pitchers, No Pooling)")
+qqline(resid(pitch_no), col = "red", lwd = 2)
+par(mfrow = c(1, 2))
+
+plot(
+  fitted(pitch_partial),
+  resid(pitch_partial),
+  pch = 19, col = rgb(0,0,0,0.3),
+  xlab = "Fitted values",
+  ylab = "Residuals",
+  main = "Residuals vs Fitted (Pitchers, Partial Pooling)"
+)
+abline(h = 0, col = "red", lty = 2)
+
+qqnorm(resid(pitch_partial),
+       main = "Normal Q-Q (Pitchers, Partial Pooling)")
+qqline(resid(pitch_partial), col = "red", lwd = 2)
+
+```
+
+pitcher variables distribution check
+
+```{r}
+# salary + log_salary
+ggplot(pitchers_df, aes(x = salary)) +
+  geom_histogram(bins = 50) +
+  labs(title = "Distribution of salary (pitchers)", x = "salary")
+
+ggplot(pitchers_df, aes(x = log_salary)) +
+  geom_histogram(bins = 50) +
+  labs(title = "Distribution of log(salary) (pitchers)", x = "log_salary")
+
+# WAR and lagged WAR
+ggplot(pitchers_df, aes(x = WAR)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of WAR (pitchers)", x = "WAR")
+
+ggplot(pitchers_df, aes(x = WAR_lag1)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of lagged WAR (pitchers)", x = "WAR_lag1")
+
+# IPouts (workload)
+ggplot(pitchers_df, aes(x = IPouts)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of IPouts (pitchers)", x = "IPouts")
+
+# Years played
+ggplot(pitchers_df, aes(x = years_played)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of years played (pitchers)", x = "years_played")
+
+# YearID
+ggplot(pitchers_df, aes(x = yearID)) +
+  geom_histogram(binwidth = 2) +
+  labs(title = "Distribution of seasons (pitchers)", x = "yearID")
+
+ggplot(pitchers_df, aes(y = log_salary)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of log(salary) (pitchers)", y = "log_salary")
+
+ggplot(pitchers_df, aes(y = WAR)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of WAR (pitchers)", y = "WAR")
+
+ggplot(pitchers_df, aes(y = WAR_lag1)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of lagged WAR (pitchers)", y = "WAR_lag1")
+
+ggplot(pitchers_df, aes(y = IPouts)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of IPouts (pitchers)", y = "IPouts")
+
+ggplot(pitchers_df, aes(y = years_played)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of years played (pitchers)", y = "years_played")
+ggplot(pitchers_df, aes(x = WAR_lag1, y = log_salary)) +
+  geom_point(alpha = 0.3) +
+  labs(title = "log(salary) vs lagged WAR (pitchers)",
+       x = "WAR_lag1", y = "log_salary")
+
+ggplot(pitchers_df, aes(x = years_played, y = log_salary)) +
+  geom_point(alpha = 0.3) +
+  labs(title = "log(salary) vs years played (pitchers)",
+       x = "years_played", y = "log_salary")
+
+ggplot(pitchers_df, aes(x = IPouts, y = log_salary)) +
+  geom_point(alpha = 0.3) +
+  labs(title = "log(salary) vs IPouts (pitchers)",
+       x = "IPouts", y = "log_salary")
+# Batters: number of observations per team
+batters_df %>%
+  count(teamID) %>%
+  ggplot(aes(x = reorder(teamID, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Number of batter seasons per team",
+       x = "teamID", y = "count")
+
+# Pitchers
+pitchers_df %>%
+  count(teamID) %>%
+  ggplot(aes(x = reorder(teamID, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Number of pitcher seasons per team",
+       x = "teamID", y = "count")
+
+```
